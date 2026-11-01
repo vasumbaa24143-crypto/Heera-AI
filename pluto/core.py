@@ -15,7 +15,8 @@ The code, not the model, decides what actually happens: actions are checked
 against the user's own items, saves are confirmed with real ids, and a reply
 that cites an item the user does not have is withheld.
 
-`llm` is any object with respond(message, history, items, now_local, prefer=None) -> dict,
+`llm` is any object with
+respond(message, history, items, now_local, prefer=None, related=()) -> dict,
 and choices() -> [(name, label)] for the /model menu.
 (llm.py talks to Gemini; offline.py and the tests provide stand-ins.)
 """
@@ -38,7 +39,8 @@ ACTION_KINDS = ("task", "promise")  # created only when the user asks for them
 PRIORITY_MARK = {"high": "🔴 ", "normal": "", "low": "⚪ "}
 TITLE_MAX = 120
 MAX_REPLY = 4000  # Telegram's limit is 4096 characters
-HISTORY_TURNS = 100  # messages of conversation the assistant sees
+HISTORY_TURNS = 30   # most recent messages the assistant sees, word for word
+SEARCH_HITS = 10     # older items, and older messages, found by search for each message
 
 START_TEXT = (
     "Hi, I'm Pluto 👋 Talk to me like you would to an assistant.\n\n"
@@ -210,12 +212,18 @@ def chat(uid, text, llm, now=None) -> list:
 
     history = db.recent_messages(uid, HISTORY_TURNS)
     rows = db.context_items(uid)
+    # Search everything older for this message's words, so "what did we discuss about X"
+    # works however long ago it was, without sending the whole history every time.
+    rows = sorted(rows + db.search_items(uid, text, SEARCH_HITS, exclude_ids=[r["id"] for r in rows]),
+                  key=lambda r: r["id"])
+    oldest_recent = history[0]["id"] if history else None
+    related = db.search_messages(uid, text, SEARCH_HITS, before_id=oldest_recent) if history else []
     db.add_message(uid, "user", text, now=now)  # the user's words, kept as said
 
     try:
         result = _normalize(
             llm.respond(text, history_views(history), item_views(rows, now), to_local(now),
-                        prefer=db.get_setting(uid, "model"))
+                        prefer=db.get_setting(uid, "model"), related=history_views(related))
         )
     except Exception:
         # Never lose a thought: if the assistant fails, keep the message as a note.
@@ -224,7 +232,6 @@ def chat(uid, text, llm, now=None) -> list:
         db.add_message(uid, "pluto", reply.text, now=now)
         return [reply]
 
-    known_ids = {r["id"] for r in rows}
     open_ids = {r["id"] for r in rows if r["status"] == "open"}
 
     # Mark done only items that really are this user's open items.
@@ -251,7 +258,8 @@ def chat(uid, text, llm, now=None) -> list:
 
     # Never invent a memory: withhold a reply that cites items the user doesn't have.
     reply = result["reply"]
-    invented = _cited_ids(reply) - known_ids - {r["id"] for r in saved}
+    cited = _cited_ids(reply)
+    invented = cited - db.existing_item_ids(uid, cited) - {r["id"] for r in saved}
     if invented:
         log.warning("assistant cited unknown items %s; reply withheld", sorted(invented))
         reply = "I couldn't find that in what you've saved with me."

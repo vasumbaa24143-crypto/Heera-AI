@@ -293,6 +293,13 @@ Its prompt is `nanobot/templates/agent/consolidator_archive.md`. In short:
 
 ## 6. Design: memory upgrade (SQLite only)
 
+> **Status: search built** (`db.search_items`, `db.search_messages`, `items_fts`, `messages_fts`;
+> `core.chat` sends 150 open + 20 recently closed items, the last 30 messages, and up to 10
+> matching older items and 10 matching older messages). Changes from this design: the "never
+> cite an unknown id" check now looks ids up in the database (so citing a real old item found
+> by search is fine), and search terms use prefix matching ("birthday" finds "birthdays").
+> Rolling summaries and profile facts are still to do.
+
 **When it's needed:** each message currently sends up to 300 open + 50 closed items and the last
 100 messages. That's fine for months of use. It becomes slow and costly when there are more than
 ~300 items, or when "what did we discuss about X" refers to chats older than the last 100 messages.

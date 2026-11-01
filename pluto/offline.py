@@ -110,7 +110,8 @@ def choices() -> list:
     return []  # the offline stand-in has no models to choose from
 
 
-def respond(message: str, history: list, items: list, now_local: datetime, prefer=None) -> dict:
+def respond(message: str, history: list, items: list, now_local: datetime, prefer=None,
+            related=()) -> dict:
     text = message.strip()
     t = text.lower()
     last_pluto = next((m["text"] for m in reversed(history) if m["role"] == "pluto"), "")
@@ -167,7 +168,7 @@ def respond(message: str, history: list, items: list, now_local: datetime, prefe
     if t.endswith("?") or t.startswith(QUESTION_START):
         q = _words(text)
         hits = [i for i in items if q & _words(i["title"] + " " + i["original_text"])]
-        said = [m for m in history if m["role"] == "user" and q & _words(m["text"])]
+        said = [m for m in [*related, *history] if m["role"] == "user" and q & _words(m["text"])]
         if not hits and not said:
             return {"reply": "I don't have anything about that saved.", "save": [], "done": []}
         lines = [f"#{i['id']} {i['title']} ({i['bucket']})" for i in hits[-5:]]
