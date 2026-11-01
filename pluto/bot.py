@@ -64,7 +64,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_text(update: Update, text: str) -> None:
     uid = update.effective_user.id
-    replies = await asyncio.to_thread(core.capture, uid, text, llm)
+    replies = await asyncio.to_thread(core.chat, uid, text, llm)
     await send(update.message, replies)
 
 
@@ -128,6 +128,12 @@ async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await send(update.message, [core.cmd_delete(update.effective_user.id, _arg(ctx))])
 
 
+async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(update.message, [core.cmd_forget(update.effective_user.id)])
+
+
 async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
@@ -188,6 +194,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("done", cmd_done))
     app.add_handler(CommandHandler("snooze", cmd_snooze))
     app.add_handler(CommandHandler("delete", cmd_delete))
+    app.add_handler(CommandHandler("forget", cmd_forget))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))

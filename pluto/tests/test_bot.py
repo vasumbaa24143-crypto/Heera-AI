@@ -7,7 +7,7 @@ import pytest
 
 import bot
 import db
-from conftest import NOW, FakeLLM, labels
+from conftest import NOW, FakeLLM, says
 
 ME, STRANGER = 111, 999
 
@@ -88,27 +88,29 @@ def buttons_of(markup):
 
 
 def test_text_is_saved_and_replied_with_buttons(monkeypatch):
-    use_llm(monkeypatch, FakeLLM(labels(("task", "Send deck", "2026-11-03T18:00"))))
-    u = update(text="kal 6 baje deck bhejna")
+    use_llm(monkeypatch, FakeLLM(says("Pakka 👍", [("task", "Send deck", "2026-11-03T18:00")])))
+    u = update(text="remind me kal 6 baje deck bhejna")
     go(bot.on_text(u, ctx()))
-    [(text, markup)] = u.message.replies
-    assert text.startswith("Saved. ✅ #1 Send deck")
+    [(first, no_markup), (text, markup)] = u.message.replies
+    assert (first, no_markup) == ("Pakka 👍", None)
+    assert text.startswith("Added ✅ #1 Send deck")
     assert buttons_of(markup) == [("✅ Done", "done:1"), ("😴 +1 day", "snz:1")]
 
 
 def test_stranger_is_ignored(monkeypatch):
-    llm = use_llm(monkeypatch, FakeLLM(labels(("note", "x", None))))
+    llm = use_llm(monkeypatch, FakeLLM(says("hi", [("note", "x", None)])))
     u = update(STRANGER, text="hello")
     go(bot.on_text(u, ctx()))
     go(bot.cmd_list(u, ctx()))
     go(bot.cmd_export(u, ctx()))
     assert u.message.replies == [] and u.message.documents == []
-    assert llm.extract_calls == [] and db.recall_pool(STRANGER) == []
+    assert llm.calls == [] and db.recall_pool(STRANGER) == []
+    assert db.recent_messages(STRANGER) == []
 
 
 def test_no_allowed_user_configured_means_nobody(monkeypatch):
     monkeypatch.setattr(bot, "ALLOWED", "")
-    use_llm(monkeypatch, FakeLLM(labels(("note", "x", None))))
+    use_llm(monkeypatch, FakeLLM(says("hi", [("note", "x", None)])))
     u = update(text="hello")
     go(bot.on_text(u, ctx()))
     assert u.message.replies == [] and db.recall_pool(ME) == []
@@ -131,14 +133,16 @@ def test_commands(monkeypatch):
     go(bot.cmd_done(u, ctx()))
     go(bot.cmd_export(u, ctx()))
     go(bot.cmd_delete(u, ctx(str(i))))
+    go(bot.cmd_forget(u, ctx()))
     texts = [t for t, _ in u.message.replies]
     assert texts == [
         f"✅ #{i} Pay rent", f"Snoozed #{i} for a day 😴", f"Done #{i} ✅",
         "Usage: /done <id>", f"Deleted #{i} forever.",
+        "Cleared our chat history (0 messages). Your saved items are untouched.",
     ]
     [(raw, name)] = u.message.documents
     assert name == "pluto-export.json"
-    assert json.loads(raw)[0]["original_text"] == "pay rent"
+    assert json.loads(raw)["items"][0]["original_text"] == "pay rent"
 
 
 def test_button_press(monkeypatch):
@@ -160,7 +164,7 @@ def test_strangers_button_press_does_nothing_but_is_answered():
 
 
 def test_voice_note_is_transcribed_then_saved(monkeypatch):
-    use_llm(monkeypatch, FakeLLM(labels(("idea", "Podcast", None))))
+    use_llm(monkeypatch, FakeLLM(says("", [("idea", "Podcast", None)])))
     seen = {}
 
     async def fake_transcribe(audio, filename, mime):
@@ -170,7 +174,7 @@ def test_voice_note_is_transcribed_then_saved(monkeypatch):
     monkeypatch.setattr(bot.stt, "transcribe", fake_transcribe)
     u = update(voice=FakeVoice())
     go(bot.on_voice(u, ctx()))
-    assert [t for t, _ in u.message.replies] == ["🎙 Heard: podcast ka idea", "Saved. 💡 #1 Podcast"]
+    assert [t for t, _ in u.message.replies] == ["🎙 Heard: podcast ka idea", "Noted 💡 #1 Podcast"]
     assert seen == {"audio": b"OggS-fake-audio", "mime": "audio/ogg"}
     assert db.recall_pool(ME)[0]["original_text"] == "podcast ka idea"
 
@@ -191,7 +195,7 @@ def test_nudge_job_sends_and_marks():
     c = ctx()
     go(bot.nudge_job(c))
     [(chat, text, markup)] = c.bot.sent
-    assert (chat, text) == (ME, f"⏰ Due: Call mom (#{i})")
+    assert (chat, text) == (ME, f"⏰ Reminder: Call mom (#{i})")
     assert ("✅ Done", f"done:{i}") in buttons_of(markup)
     assert db.get_item(ME, i)["nudge_count"] == 1
 
@@ -222,5 +226,5 @@ def test_config_check(monkeypatch):
 def test_app_builds_with_all_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST-not-a-real-token")
     app = bot.build_app()
-    assert sum(len(h) for h in app.handlers.values()) == 9
+    assert sum(len(h) for h in app.handlers.values()) == 10
     assert app.job_queue is not None  # needs python-telegram-bot[job-queue]

@@ -21,36 +21,32 @@ def fresh_db(tmp_path, monkeypatch):
 
 
 class FakeLLM:
-    """Stands in for llm.py. `extract` may be a dict, a callable(text) -> dict,
+    """Stands in for llm.py. `result` may be a dict, a callable(message, history, items) -> dict,
     or an exception to raise. Records every call."""
 
-    def __init__(self, extract=None, answer="(fake answer)"):
-        self._extract = extract if extract is not None else {"is_question": False, "items": []}
-        self._answer = answer
-        self.extract_calls, self.answer_calls = [], []
+    def __init__(self, result=None):
+        self._result = result if result is not None else {"reply": "🙂"}
+        self.calls = []
 
-    def extract(self, text, now_local):
-        self.extract_calls.append((text, now_local))
-        r = self._extract
+    def respond(self, message, history, items, now_local):
+        self.calls.append(
+            {"message": message, "history": list(history), "items": list(items), "now": now_local}
+        )
+        r = self._result
         if isinstance(r, Exception):
             raise r
-        return r(text) if callable(r) else r
-
-    def answer(self, question, items, now_local):
-        self.answer_calls.append((question, list(items), now_local))
-        if isinstance(self._answer, Exception):
-            raise self._answer
-        return self._answer
+        return r(message, history, items) if callable(r) else r
 
 
-def labels(*items, question=False):
-    """Build a labeller result: labels(("task", "Send deck", "2026-11-03T18:00"), ...)."""
-    return {
-        "is_question": question,
-        "items": [{"kind": k, "title": t, "due_local": d} for k, t, d in items],
-    }
+def says(reply="", save=(), done=()):
+    """Build an assistant result.
 
-
-@pytest.fixture
-def fake_llm():
-    return FakeLLM
+    save entries are (kind, title, due_local) or (kind, title, due_local, extra-dict)."""
+    items = []
+    for s in save:
+        kind, title, due, *extra = s
+        it = {"kind": kind, "title": title, "due_local": due}
+        if extra:
+            it.update(extra[0])
+        items.append(it)
+    return {"reply": reply, "save": items, "done": list(done)}

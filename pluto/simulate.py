@@ -2,7 +2,7 @@
 without Telegram.
 
     python simulate.py              # labels with Gemini (needs GEMINI_API_KEY in .env)
-    python simulate.py --offline    # simple built-in labeller, no network, no keys
+    python simulate.py --offline    # simple built-in assistant, no network, no keys
 
 It uses its own database (simulate.db) so it never touches the bot's pluto.db.
 Type /help inside for commands, including /advance to move the clock forward
@@ -21,12 +21,14 @@ load_dotenv()
 import core  # noqa: E402
 import db  # noqa: E402
 
-HELP = """Type anything to save it, or ask a question about what you saved.
+HELP = """Chat with Pluto like an assistant. Say "remind me ..." or "note: ..." to save
+something; ask "what's on my plate today?" or "what have we discussed about X?".
 
 /list              open items
 /done <id>         mark done
 /snooze <id>       +1 day
 /delete <id>       remove forever
+/forget            clear the chat history (items are kept)
 /export            print everything as JSON
 /tap <data>        press a button, e.g. /tap done:3
 /nudges            run the nudge check now (respects quiet hours)
@@ -48,7 +50,7 @@ class Session:
         if not line:
             return []
         if not line.startswith("/"):
-            return render(core.capture(self.uid, line, self.llm, self.now()))
+            return render(core.chat(self.uid, line, self.llm, self.now()))
         cmd, _, arg = line.partition(" ")
         arg = arg.strip() or None
         now = self.now()
@@ -62,6 +64,8 @@ class Session:
             return render([core.cmd_snooze(self.uid, arg, now)])
         if cmd == "/delete":
             return render([core.cmd_delete(self.uid, arg)])
+        if cmd == "/forget":
+            return render([core.cmd_forget(self.uid)])
         if cmd == "/export":
             return [core.export_json(self.uid)]
         if cmd == "/tap":
@@ -99,7 +103,7 @@ def render(replies) -> list:
 
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(description="Chat with Pluto in the terminal.")
-    p.add_argument("--offline", action="store_true", help="use the built-in rule-based labeller")
+    p.add_argument("--offline", action="store_true", help="use the built-in rule-based assistant")
     p.add_argument("--db", default=os.getenv("PLUTO_SIM_DB", "simulate.db"))
     p.add_argument("--user", type=int, default=1, help="pretend Telegram user id")
     args = p.parse_args(argv)
@@ -114,7 +118,7 @@ def main(argv=None) -> None:
     db.DB_PATH = args.db
     db.init()
     s = Session(llm, args.user)
-    mode = "offline labeller" if args.offline else f"Gemini ({llm.MODEL})"
+    mode = "offline assistant" if args.offline else f"Gemini ({llm.MODEL})"
     print(f"Pluto simulator — {mode}, database {args.db}. /help for commands, /quit to exit.")
     while True:
         try:
