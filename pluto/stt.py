@@ -12,7 +12,7 @@ URL = os.getenv("SARVAM_STT_URL", "https://api.sarvam.ai/speech-to-text")
 MODEL = os.getenv("SARVAM_STT_MODEL", "saaras:v3")
 
 
-async def transcribe(audio: bytes, filename: str = "voice.ogg") -> str:
+async def transcribe(audio: bytes, filename: str = "voice.ogg", mime: str = "audio/ogg") -> str:
     key = os.getenv("SARVAM_API_KEY")
     if not key:
         raise RuntimeError("SARVAM_API_KEY is not set")
@@ -20,7 +20,7 @@ async def transcribe(audio: bytes, filename: str = "voice.ogg") -> str:
         r = await client.post(
             URL,
             headers={"api-subscription-key": key},
-            files={"file": (filename, audio, "audio/ogg")},
+            files={"file": (filename, audio, mime)},
             data={"model": MODEL},
         )
     r.raise_for_status()

@@ -1,22 +1,44 @@
 """Understanding layer: label a message, and answer recall questions.
 
-Uses the Anthropic API. Swap this file to change the model provider.
+Uses Google Gemini (google-genai SDK). Swap this file to change the model
+provider; core.py only needs extract() and answer().
 """
 import json
 import os
 from datetime import datetime
 
-from anthropic import Anthropic
+import db
 
-MODEL = os.getenv("PLUTO_MODEL", "claude-haiku-5-5")
+MODEL = os.getenv("PLUTO_MODEL", "gemini-2.5-flash")
 _client = None
 
 
-def _c() -> Anthropic:
+def _c():
     global _client
     if _client is None:
-        _client = Anthropic()  # reads ANTHROPIC_API_KEY
+        from google import genai
+
+        key = os.getenv("GEMINI_API_KEY")
+        if not key:
+            raise RuntimeError("GEMINI_API_KEY is not set")
+        _client = genai.Client(api_key=key)
     return _client
+
+
+def _generate(system: str, user: str, json_mode: bool) -> str:
+    from google.genai import types
+
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        temperature=0.2,
+        max_output_tokens=2048,
+        response_mime_type="application/json" if json_mode else "text/plain",
+    )
+    resp = _c().models.generate_content(model=MODEL, contents=user, config=config)
+    text = resp.text
+    if not text:
+        raise ValueError("empty response from model")
+    return text
 
 
 def _json_from(text: str) -> dict:
@@ -54,18 +76,12 @@ Rules:
 
 
 def extract(text: str, now_local: datetime) -> dict:
-    msg = _c().messages.create(
-        model=MODEL,
-        max_tokens=800,
-        system=EXTRACT_SYSTEM,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Current local time: {now_local:%A, %Y-%m-%d %H:%M}\n\nMessage:\n{text}",
-            }
-        ],
+    out = _generate(
+        EXTRACT_SYSTEM,
+        f"Current local time: {now_local:%A, %Y-%m-%d %H:%M}\n\nMessage:\n{text}",
+        json_mode=True,
     )
-    data = _json_from(msg.content[0].text)
+    data = _json_from(out)
     data.setdefault("is_question", False)
     data.setdefault("items", [])
     return data
@@ -77,24 +93,25 @@ Cite item ids like #12. If nothing in the items answers the question, say plainl
 you do not have it saved. Never invent or guess a memory."""
 
 
-def answer(question: str, items: list, now_local: datetime) -> str:
+def _local(s: str, tz) -> str:
+    return db.from_str(s).astimezone(tz).strftime("%Y-%m-%d %H:%M")
+
+
+def format_items(items: list, tz) -> str:
     lines = []
     for r in items:
-        due = f" | due {r['due_at']}" if r["due_at"] else ""
+        due = f" | due {_local(r['due_at'], tz)}" if r["due_at"] else ""
         lines.append(
-            f"#{r['id']} [{r['kind']}, {r['status']}] saved {r['created_at']}{due}\n"
+            f"#{r['id']} [{r['kind']}, {r['status']}] saved {_local(r['created_at'], tz)}{due}\n"
             f"  title: {r['title']}\n  original: {r['original_text']}"
         )
-    context = "\n".join(lines) if lines else "(nothing saved yet)"
-    msg = _c().messages.create(
-        model=MODEL,
-        max_tokens=600,
-        system=ANSWER_SYSTEM,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Now: {now_local:%A, %Y-%m-%d %H:%M}\n\nSaved items:\n{context}\n\nQuestion: {question}",
-            }
-        ],
-    )
-    return msg.content[0].text.strip()
+    return "\n".join(lines) if lines else "(nothing saved yet)"
+
+
+def answer(question: str, items: list, now_local: datetime) -> str:
+    context = format_items(items, now_local.tzinfo)
+    return _generate(
+        ANSWER_SYSTEM,
+        f"Now: {now_local:%A, %Y-%m-%d %H:%M}\n\nSaved items:\n{context}\n\nQuestion: {question}",
+        json_mode=False,
+    ).strip()
