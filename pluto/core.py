@@ -52,6 +52,7 @@ START_TEXT = (
     "/list  open items · /done <id> · /snooze <id> (+1 day)\n"
     "/delete <id>  remove forever · /forget  clear our chat history\n"
     "/model  choose which AI thinks first\n"
+    "/digest  morning digest (on at 08:30; /digest now to preview)\n"
     "/export  download everything"
 )
 
@@ -390,7 +391,10 @@ def due_nudges(now=None) -> list:
     db.mark_nudged(item_id, user_id, now), so a failed send is retried."""
     now = now or db.now_utc()
     out = []
-    for r, reason in db.pick_nudges(now, quiet=in_quiet_hours(now)):
+    # With the morning digest on, old ideas come up there (one a day), so they
+    # don't also get their own nudges.
+    no_digest = lambda uid: not digest_settings(uid)[0]  # noqa: E731
+    for r, reason in db.pick_nudges(now, quiet=in_quiet_hours(now), idea_nudges=no_digest):
         if reason == "reminder":
             reply = Reply(f"⏰ Reminder: {r['title']} (#{r['id']})", item_buttons(r["id"]))
         elif reason == "due":
@@ -404,3 +408,146 @@ def due_nudges(now=None) -> list:
             )
         out.append((r["user_id"], r["id"], reply))
     return out
+
+
+# ---------- daily digest ----------
+
+DIGEST_DEFAULT_TIME = "08:30"
+DIGEST_GRACE = timedelta(hours=4)    # if the bot was down at digest time, catch up within this
+DIGEST_MAX_PER_SECTION = 5
+DIGEST_IDEA_AFTER = timedelta(days=7)  # an idea must be this old, and not shown this recently
+_HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+
+def digest_settings(uid) -> tuple:
+    """(enabled, "HH:MM"). On by default."""
+    enabled = db.get_setting(uid, "digest_enabled", "on") != "off"
+    when = db.get_setting(uid, "digest_time", DIGEST_DEFAULT_TIME)
+    return enabled, when if _HHMM.match(when) else DIGEST_DEFAULT_TIME
+
+
+def _digest_start(uid, now):
+    """Today's digest time (local) for this user, as an aware datetime."""
+    _, when = digest_settings(uid)
+    h, m = (int(x) for x in when.split(":"))
+    return to_local(now).replace(hour=h, minute=m, second=0, microsecond=0)
+
+
+def _digest_content(uid, now):
+    """(Reply or None, ids to mark as shown). None means there's nothing worth saying."""
+    local = to_local(now)
+    end_of_day = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    overdue, today, idea = db.digest_rows(uid, now, end_of_day, now - DIGEST_IDEA_AFTER)
+    if not overdue and not today and idea is None:
+        return None, []
+
+    rank = {"high": 0, "normal": 1, "low": 2}
+    overdue = sorted(overdue, key=lambda r: (to_local(db.from_str(r["due_at"])).date(),
+                                             rank.get(r["priority"], 1), r["due_at"], r["id"]))
+
+    def section(title, rows, line):
+        out = [f"{title} ({len(rows)})"] + [line(r) for r in rows[:DIGEST_MAX_PER_SECTION]]
+        if len(rows) > DIGEST_MAX_PER_SECTION:
+            out.append(f"…and {len(rows) - DIGEST_MAX_PER_SECTION} more — /list")
+        return "\n".join(out)
+
+    def mark(r):
+        return PRIORITY_MARK.get(r["priority"], "") if r["kind"] in ACTION_KINDS else ""
+
+    def overdue_line(r):
+        return f"• #{r['id']} {mark(r)}{r['title']} (was due {fmt_due(r['due_at'])})"
+
+    def today_line(r):
+        return f"• #{r['id']} {mark(r)}{r['title']} — {to_local(db.from_str(r['due_at'])):%H:%M}"
+
+    parts = [f"☀️ Good morning! Here's your day ({local:%a %d %b}):"]
+    if overdue:
+        parts.append(section("⚠️ Overdue", overdue, overdue_line))
+    if today:
+        parts.append(section("📅 Today", today, today_line))
+    if idea is not None:
+        days = (now - db.from_str(idea["created_at"])).days
+        parts.append(f"💡 From a while back\n• #{idea['id']} {idea['title']} "
+                     f"(you told me {days} days ago). Still interested?")
+
+    shown = overdue[:DIGEST_MAX_PER_SECTION] + today[:DIGEST_MAX_PER_SECTION]
+    done_buttons = [(f"✅ #{r['id']}", f"done:{r['id']}") for r in shown]
+    rows = [done_buttons[i:i + 4] for i in range(0, len(done_buttons), 4)]
+    if idea is not None:
+        rows.append([("🗄 Drop idea", f"arc:{idea['id']}")])
+
+    # Overdue items and the idea count as nudged, so a repeat nudge doesn't follow
+    # an hour later. Items due later today are NOT marked: their own reminder
+    # still fires at the time the user set.
+    to_mark = [r["id"] for r in overdue[:DIGEST_MAX_PER_SECTION]]
+    if idea is not None:
+        to_mark.append(idea["id"])
+    return Reply(_short("\n\n".join(parts)), rows), to_mark
+
+
+def build_digest(uid, now=None):
+    """Today's digest as a Reply, or None when there's nothing to say. Changes nothing."""
+    return _digest_content(uid, now or db.now_utc())[0]
+
+
+def due_digests(user_ids, now=None) -> list:
+    """Digests to handle now, as (user_id, Reply or None, ids_to_mark).
+
+    Due once per local day, from the user's digest time until DIGEST_GRACE later
+    (so a bot that was down at 08:30 still sends at 09:10, but not at 15:00).
+    Reply None means "nothing to say": call digest_done() without sending.
+    After a successful send, call digest_done() so it isn't sent twice."""
+    now = now or db.now_utc()
+    today = to_local(now).date().isoformat()
+    out = []
+    for uid in user_ids:
+        enabled, _ = digest_settings(uid)
+        if not enabled or db.get_setting(uid, "digest_last_date") == today:
+            continue
+        if db.count_items(uid) == 0:
+            continue  # nothing saved yet: no empty "good morning"s
+        start = _digest_start(uid, now)
+        if to_local(now) < start:
+            continue
+        if to_local(now) >= start + DIGEST_GRACE:
+            out.append((uid, None, []))  # too late for a morning digest today
+            continue
+        reply, to_mark = _digest_content(uid, now)
+        out.append((uid, reply, to_mark))
+    return out
+
+
+def digest_done(uid, ids, now=None) -> None:
+    now = now or db.now_utc()
+    for item_id in ids:
+        db.touch_nudged(item_id, uid, now)
+    db.set_setting(uid, "digest_last_date", to_local(now).date().isoformat())
+
+
+def cmd_digest(uid, arg=None, now=None) -> Reply:
+    """/digest            show the setting
+    /digest now        preview today's digest (doesn't count as sent)
+    /digest on|off     turn it on or off
+    /digest 07:45      change the time"""
+    arg = (arg or "").strip().lower()
+    if arg == "now":
+        return build_digest(uid, now) or Reply("Nothing for today's digest: nothing overdue, "
+                                               "nothing due today, no old idea to revisit. 🎉")
+    if arg in ("on", "off"):
+        db.set_setting(uid, "digest_enabled", arg)
+        if arg == "off":
+            return Reply("Morning digest is off. /digest on to turn it back on.")
+        return Reply(f"Morning digest is on, at {digest_settings(uid)[1]} every day.")
+    if arg:
+        m = _HHMM.match(arg)
+        if not m:
+            return Reply("Usage: /digest, /digest now, /digest on|off, or /digest 07:45")
+        when = f"{int(m.group(1)):02d}:{m.group(2)}"
+        db.set_setting(uid, "digest_time", when)
+        db.set_setting(uid, "digest_enabled", "on")
+        return Reply(f"Done — your morning digest will come at {when}.")
+    enabled, when = digest_settings(uid)
+    state = f"on, at {when} every day" if enabled else "off"
+    return Reply(f"☀️ Morning digest is {state}. It lists what's overdue, what's due today and "
+                 "one old idea, and is skipped when there's nothing to say.\n"
+                 "/digest now to preview · /digest 07:45 to change the time · /digest off")

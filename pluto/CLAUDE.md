@@ -44,12 +44,17 @@ chat history; `/model` picks which AI provider goes first (saved per user, other
 stay as backup); `/export` returns items and conversation. A reminder's first alert
 always goes out at the time the user set (checked every minute), even at night and
 past the cap; repeat nudges and idea nudges wait out quiet hours (22:00–08:00) and are
-capped at 5 per user per 24 hours.
+capped at 5 per user per 24 hours. The morning digest (`core.due_digests`, `/digest`) is
+built from data with no AI call. It's sent at most once per local day, from the user's
+digest time until 4 h later, and skipped when there's nothing overdue, nothing due today
+and no idea to revisit. With the digest on, stale ideas appear only there, not as
+separate nudges. Digest items are marked shown with `db.touch_nudged`, which doesn't
+use the daily cap.
 
 ## Layout
 
 - `core.py` — the whole flow (`chat`, commands, buttons, time buckets, nudge
-  selection). Transport-agnostic and synchronous. Put new behaviour here. The model
+  selection, morning digest). Transport-agnostic and synchronous. Put new behaviour here. The model
   proposes (`reply`, `save`, `done`); core checks and applies.
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`.

@@ -32,7 +32,8 @@ something; ask "what's on my plate today?" or "what have we discussed about X?".
 /forget            clear the chat history (items are kept)
 /export            print everything as JSON
 /tap <data>        press a button, e.g. /tap done:3
-/nudges            run the nudge check now (respects quiet hours)
+/nudges            run the reminder, nudge and morning-digest checks now
+/digest [now|on|off|HH:MM]  morning digest settings, or preview it
 /advance <n>h|<n>d move the simulated clock forward, e.g. /advance 6h
 /time              show the simulated time
 /quit              exit"""
@@ -67,6 +68,8 @@ class Session:
             return render([core.cmd_delete(self.uid, arg)])
         if cmd == "/model":
             return render([core.cmd_model(self.uid, self.llm, arg)])
+        if cmd == "/digest":
+            return render([core.cmd_digest(self.uid, arg, now)])
         if cmd == "/forget":
             return render([core.cmd_forget(self.uid)])
         if cmd == "/export":
@@ -76,6 +79,10 @@ class Session:
             return render([reply]) if reply else ["Unknown button."]
         if cmd == "/nudges":
             out = []
+            for uid, reply, to_mark in core.due_digests([self.uid], now):
+                if reply is not None:
+                    out += render([reply])
+                core.digest_done(uid, to_mark, now)
             for uid, item_id, reply in core.due_nudges(now):
                 db.mark_nudged(item_id, uid, now)
                 if uid == self.uid:

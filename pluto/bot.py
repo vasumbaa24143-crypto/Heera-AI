@@ -156,6 +156,12 @@ async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await send(update.message, [core.cmd_model(update.effective_user.id, llm, _arg(ctx))])
 
 
+async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(update.message, [core.cmd_digest(update.effective_user.id, _arg(ctx))])
+
+
 async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
@@ -195,6 +201,23 @@ async def nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         db.mark_nudged(item_id, uid, now)
 
 
+def digest_users() -> list:
+    """Who gets a morning digest: the one allowed user."""
+    return [int(ALLOWED)] if ALLOWED.isdigit() else []
+
+
+async def digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    now = db.now_utc()
+    for uid, reply, to_mark in core.due_digests(digest_users(), now):
+        if reply is not None:
+            try:
+                await ctx.bot.send_message(uid, reply.text, reply_markup=markup(reply))
+            except Exception:
+                log.exception("digest failed for user %s", uid)
+                continue  # not marked as sent: tried again next minute, until the grace ends
+        core.digest_done(uid, to_mark, now)
+
+
 def check_config() -> None:
     missing = [k for k in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID") if not os.getenv(k)]
     if not llm.providers():
@@ -220,12 +243,14 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("forget", cmd_forget))
     app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("digest", cmd_digest))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(nudge_job, interval=NUDGE_EVERY_SECONDS, first=5)
+    app.job_queue.run_repeating(digest_job, interval=NUDGE_EVERY_SECONDS, first=10)
     return app
 
 

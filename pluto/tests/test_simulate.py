@@ -28,8 +28,11 @@ def test_scripted_session_offline(monkeypatch):
     assert s.handle("thanks") == ["Anytime! 🙂"]
 
     assert s.handle("/nudges") == ["(nothing to nudge right now)"]
-    s.handle("/advance 2d")
-    assert any("Reminder: call Rahul" in o for o in s.handle("/nudges"))
+    s.handle("/advance 2d")  # Wed 12:00; the 17:00 Tuesday reminder was missed meanwhile
+    digest = "\n".join(s.handle("/nudges"))
+    assert digest.startswith("☀️ Good morning!")
+    assert "⚠️ Overdue (1)\n• #3 call Rahul (was due Tue 03 Nov, 17:00)" in digest
+    assert s.handle("/nudges") == ["(nothing to nudge right now)"]  # covered by the digest
     assert s.handle("/tap done:3") == ["Done #3 ✅"]
     assert s.handle("/delete 1") == ["Deleted #1 forever."]
     assert s.handle("/forget")[0].startswith("Cleared our chat history")

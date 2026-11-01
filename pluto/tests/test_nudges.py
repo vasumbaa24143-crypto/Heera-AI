@@ -5,8 +5,24 @@ import core
 import db
 from conftest import NOW
 
+import pytest
+
 UID, OTHER = 111, 222
 H, D = timedelta(hours=1), timedelta(days=1)
+
+
+@pytest.fixture(autouse=True)
+def digest_off():
+    """These tests cover the separate nudges, which run in full when the digest is off."""
+    for uid in (UID, OTHER):
+        db.set_setting(uid, "digest_enabled", "off")
+
+
+def test_with_the_digest_on_ideas_are_not_nudged_separately():
+    db.set_setting(UID, "digest_enabled", "on")
+    add(kind="idea", created=NOW - 10 * D)
+    task = add(due=NOW - H)
+    assert run(NOW) == [task]
 
 
 def add(uid=UID, kind="task", title="t", due=None, created=NOW):
