@@ -13,13 +13,15 @@ nudges until things are done. Read README.md for setup and behaviour.
    dates are derived data; the user's own words are the source of truth. If a message
    is split into several items, each keeps the whole message; if an item came from a
    follow-up ("remind me to call Rahul" → "kal 5 baje"), it keeps both messages.
-2. **Never invent a memory.** Answers come only from the user's saved items and their
-   conversation with Pluto. If nothing matches, say so plainly. The assistant must never
+2. **Never invent a memory.** Answers come only from the user's saved items, their
+   conversation with Pluto and a Google Sheet they sent a link to. If nothing matches,
+   say so plainly. The assistant must never
    invent a deadline or a priority the user did not give or clearly imply. In code, a
    reply that cites an item id the user does not have is withheld (`core.chat`).
 3. **Ask before any outside action.** Pluto only ever messages its own user. It must not
    contact other people, post, buy, or call outside services beyond the AI providers
-   (Gemini, Groq, Z AI, NVIDIA) and transcription (Sarvam) without the user saying yes first. The same goes for
+   (Gemini, Groq, Z AI, NVIDIA), transcription (Sarvam) and Google Sheets (only through Pluto's
+   own service account, see `sheets.py`) without the user saying yes first. The same goes for
    anyone working on this repo: ask before pushing, deploying, creating repos, or
    sending anything to an external service.
 4. **Keys only in `.env`.** API keys and tokens live in `.env` (local) or the host's
@@ -46,13 +48,25 @@ always goes out at the time the user set (checked every minute), even at night a
 past the cap; repeat nudges and idea nudges wait out quiet hours (22:00–08:00) and are
 capped at 5 per user per 24 hours.
 
+Google Sheets (`sheets.py`) is optional and stays off until `GOOGLE_SERVICE_ACCOUNT_FILE` is set.
+The assistant may ask to read a sheet (`read`), but core opens it only if the user sent that link;
+what it reads is data and is never saved. What to save or mark done comes only from the first
+answer, which never saw the sheet (the answer that did only supplies the words), so a hostile
+sheet can't make Pluto save, finish or open anything. `PLUTO_LOG_SHEET_ID` also turns on a copy of the items in a tab called `Pluto`: the database
+stays the source of truth, the tab is rewritten whenever something changed, `/delete` removes the
+row (Google's version history may still hold it), and original messages stay out unless
+`PLUTO_LOG_ORIGINAL=1`. The Google key file is a secret like the other keys: keep it outside the repo.
+
 ## Layout
 
 - `core.py` — the whole flow (`chat`, commands, buttons, time buckets, nudge
   selection). Transport-agnostic and synchronous. Put new behaviour here. The model
-  proposes (`reply`, `save`, `done`); core checks and applies.
+  proposes (`reply`, `save`, `done`, `read`); core checks and applies.
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
-- `db.py` — SQLite. Every time-dependent function takes an optional `now`.
+- `db.py` — SQLite. Every time-dependent function takes an optional `now`. `db.on_change` is
+  called when an item is added, finished or deleted (the bot uses it for the Sheets log).
+- `sheets.py` — Google Sheets: read a linked sheet, and keep the item log tab. Every Google call
+  goes through `_call` and `_token`, so tests replace them.
 - `llm.py` — the assistant (`respond`) and its system prompt. Tries Gemini → Groq →
   Z AI → NVIDIA Nemotron until one returns valid JSON (`PLUTO_PROVIDERS` sets the order); if all fail,
   core saves the raw note (rule 5).
@@ -73,5 +87,6 @@ python bot.py --check          # which keys are set in .env (never prints values
 
 - Every rule above has a test; add one when you add behaviour.
 - Tests must not touch the network or real keys. Use `FakeLLM`/`says` and the fakes in
-  `tests/test_bot.py`.
+  `tests/test_bot.py`; `tests/conftest.py` clears the Google settings and blocks Google
+  sign-in, and `tests/test_sheets.py` has a `FakeGoogle`.
 - Python 3.11+ (google-genai requires it).

@@ -10,6 +10,7 @@ You chat with it like a smart assistant, by text or voice note, in English, Hind
 - **Ask about your plans.** "What's on my plate today?", "is hafte kya hai?", "this month", "overall what do I need to do?", "what have we discussed about the YouTube idea?" It answers only from what you saved and said.
 - **Tell it when things are done.** "Rahul ko deck bhej diya" → marks that item done.
 - **Nudges** when something is due, or when an idea goes untouched.
+- **Google Sheets (optional).** Send a link to a sheet and ask about it, and Pluto reads it. It can also keep a copy of your items in a sheet of your own. See "Google Sheets" below.
 
 ## Setup (about 10 minutes)
 
@@ -65,6 +66,22 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 - Done / Snooze / Drop buttons on every nudge.
 - Your computer must be awake with `python bot.py` running for reminders to arrive. To get them when your Mac is asleep, deploy it (see below).
 
+## Google Sheets (optional)
+
+Pluto can read a Google Sheet you send it, and keep a copy of your items in a sheet of your own. Both go through one Google service account, so Pluto only reaches sheets you share with that account. Nothing runs until you set it up:
+
+1. In [Google Cloud](https://console.cloud.google.com/), pick or create a project, then **APIs & Services → Library → Google Sheets API → Enable**.
+2. **IAM & Admin → Service accounts → Create service account** (any name, e.g. `pluto`). Open it, then **Keys → Add key → Create new key → JSON**. A key file downloads. Keep it outside this folder (for example `~/.pluto/google-key.json`): anyone who has it can open every sheet you shared with the account.
+3. In `pluto.env` set `GOOGLE_SERVICE_ACCOUNT_FILE=/full/path/to/that-file.json`. (On a host without files, such as Railway, set `GOOGLE_SERVICE_ACCOUNT_JSON` to the file's contents instead.)
+4. Run `python bot.py --check`. It prints the service account's email address. In Google Sheets press **Share** on each sheet and share it with that address: **Viewer** for sheets you want Pluto to read, **Editor** for the log sheet.
+5. For the item log, create a blank sheet, share it with that address as **Editor**, and put its address (or just the id between `/d/` and `/edit`) in `PLUTO_LOG_SHEET_ID`. Restart the bot.
+
+**Reading a sheet.** Send the link and ask about it: "what's the total in this sheet? https://docs.google.com/spreadsheets/d/…". Pluto reads the first 200 rows and columns A to Z of the tab in the link (the first tab if the link names none) and answers from them only. A link you just share so Pluto remembers it ("budget sheet ka link hai …") is noted, not opened. Reading never changes the sheet. The rows go to the same AI providers as your chat, and they are not saved. Text inside a sheet is only data: what Pluto saves or marks done comes from your own message, so a sheet can't make it save, finish or open anything. `simulate.py` can read sheets too, but it never writes the log.
+
+**The item log.** Pluto keeps a tab called `Pluto` in the log sheet with one row per item: id, saved, kind, title, due, priority, status. Within a minute of any change (a new item, done, `/delete`) it rewrites that tab from its own database, so the sheet is only ever a copy. Don't edit the `Pluto` tab (Pluto owns it and clears anything else in it): put your own notes on another tab. Your original messages are left out unless you set `PLUTO_LOG_ORIGINAL=1`, and API keys or tokens in a title are replaced with `[REDACTED_KEY]`. If Google can't be reached Pluto carries on, and tries again a few minutes later.
+
+`/delete` removes the row on the next update, but Google keeps a version history of every sheet, so anyone who can open the sheet's history can still see what used to be there. If that matters to you, leave the log off.
+
 ## Rules built in
 
 See `CLAUDE.md`. In short: your original message is stored untouched; if labelling fails it is still
@@ -81,4 +98,5 @@ The bot must be running to nudge.
 
 - Each message sends the last 100 chat messages and your open items (plus 50 recent closed ones) to the model. "What have we discussed" only reaches that far back in the chat; saved items are always included. Add search/embeddings when this gets slow or costly.
 - Voice notes: Groq `whisper-large-v3` → Gemini → Sarvam `saarika:v2.5` (`STT_PROVIDERS` changes the order).
+- Google Sheets: a question reads one tab (first 200 rows, columns A to Z). The item log rewrites its whole `Pluto` tab on every change, so it suits hundreds or a few thousand items.
 - AI providers are tried in order Gemini → Groq → Z AI → NVIDIA Nemotron (`PLUTO_PROVIDERS` changes it, and `/model` in chat picks which one goes first; the rest stay as backup). Default models: `gemini-2.5-flash`, `llama-3.3-70b-versatile` (Groq), `glm-4.6` (Z AI), `nvidia/nemotron-3.5-super-vl-120b-a12b` (NVIDIA, with thinking off for quick replies; `NVIDIA_THINKING=1` turns it on); change `PLUTO_MODEL`, `GROQ_MODEL`, `ZAI_MODEL`, `NVIDIA_MODEL` if a provider retires one. Fallback models may phrase replies differently, but the code-side checks (what gets saved, never citing unknown items) apply to all of them.

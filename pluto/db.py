@@ -15,6 +15,14 @@ STATUSES = ("open", "done", "archived")
 PRIORITIES = ("high", "normal", "low")
 _PRIORITY_ORDER = "CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END"
 
+# The bot sets this to be told when an item is added, finished or deleted (see sheets.py).
+on_change = None
+
+
+def _changed() -> None:
+    if on_change is not None:
+        on_change()
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -103,7 +111,9 @@ def add_item(user_id, kind, title, original_text, due_at=None, now=None, priorit
             " VALUES (?,?,?,?,?,?,?)",
             (user_id, kind, title, original_text, due_at, to_str(now or now_utc()), priority),
         )
-        return cur.lastrowid
+        item_id = cur.lastrowid
+    _changed()
+    return item_id
 
 
 def get_item(user_id, item_id):
@@ -207,7 +217,10 @@ def set_status(user_id, item_id, status) -> bool:
             "UPDATE items SET status=? WHERE id=? AND user_id=?",
             (status, item_id, user_id),
         )
-        return cur.rowcount > 0
+        changed = cur.rowcount > 0
+    if changed:
+        _changed()
+    return changed
 
 
 def delete_item(user_id, item_id) -> bool:
@@ -225,7 +238,8 @@ def delete_item(user_id, item_id) -> bool:
                 "DELETE FROM messages WHERE user_id=? AND role='user' AND text=?",
                 (user_id, line),
             )
-        return True
+    _changed()
+    return True
 
 
 def snooze(user_id, item_id, hours=24, now=None) -> bool:
