@@ -4,6 +4,7 @@ Every function that depends on the current time takes an optional `now`
 (an aware UTC datetime) so tests and simulate.py can control the clock.
 """
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -100,6 +101,144 @@ def init() -> None:
         # Older prototype builds soft-deleted rows; /delete promises "remove forever".
         c.execute("DELETE FROM nudges WHERE item_id IN (SELECT id FROM items WHERE status='deleted')")
         c.execute("DELETE FROM items WHERE status='deleted'")
+        _init_search(c)
+
+
+# ---------- full-text search (SQLite FTS5) ----------
+#
+# Two external-content FTS5 indexes point at the real rows in `items` and `messages`,
+# so the text isn't stored twice and the original rows stay the source of truth.
+# Triggers keep them in step on insert/delete (and on the rare item update), which
+# also makes /delete and /forget remove things from search. The `unicode61`
+# tokenizer is used without Porter stemming, which is English-only and would mangle
+# Hinglish words. If this SQLite has no FTS5, search falls back to LIKE.
+
+HAS_FTS = None  # set by init()
+
+_SEARCH_TABLES = {
+    # index table: (content table, indexed columns)
+    "items_fts": ("items", ("title", "original_text")),
+    "messages_fts": ("messages", ("text",)),
+}
+
+
+def _init_search(c) -> None:
+    global HAS_FTS
+    try:
+        for fts, (table, cols) in _SEARCH_TABLES.items():
+            existed = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (fts,)
+            ).fetchone()
+            col_list = ", ".join(cols)
+            c.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5({col_list},"
+                f" content='{table}', content_rowid='id',"
+                " tokenize='unicode61 remove_diacritics 2')"
+            )
+            new = ", ".join(f"new.{x}" for x in cols)
+            old = ", ".join(f"old.{x}" for x in cols)
+            c.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_ai AFTER INSERT ON {table} BEGIN"
+                f" INSERT INTO {fts}(rowid, {col_list}) VALUES (new.id, {new}); END"
+            )
+            c.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_ad AFTER DELETE ON {table} BEGIN"
+                f" INSERT INTO {fts}({fts}, rowid, {col_list}) VALUES ('delete', old.id, {old}); END"
+            )
+            c.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_au AFTER UPDATE OF {col_list} ON {table} BEGIN"
+                f" INSERT INTO {fts}({fts}, rowid, {col_list}) VALUES ('delete', old.id, {old});"
+                f" INSERT INTO {fts}(rowid, {col_list}) VALUES (new.id, {new}); END"
+            )
+            if not existed:  # first run on an existing database: index what's already there
+                c.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+        HAS_FTS = True
+    except sqlite3.OperationalError as e:
+        if "fts5" not in str(e).lower():
+            raise
+        HAS_FTS = False  # this SQLite build has no FTS5: search uses LIKE instead
+
+
+_TOKEN = re.compile(r"[\w\u0900-\u097F]+")  # words, including Devanagari
+STOPWORDS = frozenset("""
+a an and are as at be but by did do does for from had has have i if in into is it its me my of
+on or our so than that the their them then there these they this to us was we were what when
+where which who why will with would you your about tell said say discussed remember anything
+something please pluto
+kya kab kaun kahan kaise kyun tha thi the hai hain ho hoga ka ki ke ko se me mein mai main par pe
+wala wali wale aur ya bhi to toh na nahi mujhe mera meri mere hum humne maine tum tumne aap
+baare bare baat baatein
+""".split())
+
+
+def search_terms(query: str) -> list:
+    """Meaningful words from a question, lower-cased, stop-words removed, de-duplicated."""
+    words = [w.lower() for w in _TOKEN.findall(query or "")]
+    return list(dict.fromkeys(w for w in words if len(w) > 1 and w not in STOPWORDS))
+
+
+def _match_query(terms) -> str:
+    """Safe FTS5 query: each word quoted (so punctuation can't break the syntax), OR-ed, with
+    prefix matching for longer words ("birthday" also finds "birthdays"). BM25 ranks rows that
+    match more of the words higher."""
+    parts = []
+    for t in terms:
+        q = '"' + t.replace('"', '""') + '"'
+        parts.append(q + "*" if len(t) >= 4 else q)
+    return " OR ".join(parts)
+
+
+def _search(table, fts, cols, user_id, query, k, extra_where="", extra_args=()):
+    terms = search_terms(query)
+    if not terms or k <= 0:
+        return []
+    if HAS_FTS:
+        try:
+            with conn() as c:
+                return c.execute(
+                    f"SELECT t.* FROM {fts} JOIN {table} t ON t.id = {fts}.rowid"
+                    f" WHERE {fts} MATCH ? AND t.user_id=? {extra_where}"
+                    f" ORDER BY bm25({fts}), t.id DESC LIMIT ?",
+                    (_match_query(terms), user_id, *extra_args, k),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            pass  # unexpected query trouble: fall back to LIKE below
+    like = " OR ".join(f"{col} LIKE ?" for _ in terms for col in cols)
+    args = [f"%{t}%" for t in terms for _ in cols]
+    with conn() as c:
+        return c.execute(
+            f"SELECT t.* FROM {table} t WHERE t.user_id=? AND ({like}) {extra_where}"
+            " ORDER BY t.id DESC LIMIT ?",
+            (user_id, *args, *extra_args, k),
+        ).fetchall()
+
+
+def search_items(user_id, query, k=10, exclude_ids=()):
+    """The user's saved items that best match the words in `query`."""
+    ex = tuple(exclude_ids)
+    where = f"AND t.id NOT IN ({','.join('?' * len(ex))})" if ex else ""
+    return _search("items", "items_fts", ("title", "original_text"), user_id, query, k, where, ex)
+
+
+def search_messages(user_id, query, k=10, before_id=None):
+    """Past chat messages (both sides) that best match `query`, oldest-first in the result.
+    `before_id` limits the search to messages older than that id (i.e. not already in the
+    recent conversation)."""
+    where, args = ("AND t.id < ?", (before_id,)) if before_id else ("", ())
+    rows = _search("messages", "messages_fts", ("text",), user_id, query, k, where, args)
+    return sorted(rows, key=lambda r: r["id"])
+
+
+def existing_item_ids(user_id, ids) -> set:
+    ids = tuple(ids)
+    if not ids:
+        return set()
+    with conn() as c:
+        rows = c.execute(
+            f"SELECT id FROM items WHERE user_id=? AND id IN ({','.join('?' * len(ids))})",
+            (user_id, *ids),
+        ).fetchall()
+    return {r["id"] for r in rows}
 
 
 def add_item(user_id, kind, title, original_text, due_at=None, now=None, priority="normal") -> int:
@@ -141,11 +280,13 @@ def recall_pool(user_id, limit=300):
         ).fetchall()
 
 
-def context_items(user_id, open_limit=300, closed_limit=50):
-    """What the assistant gets to see: all open items plus the most recent closed ones."""
+def context_items(user_id, open_limit=150, closed_limit=20):
+    """Items the assistant always sees: open items (the most urgent `open_limit`) plus the
+    most recently closed ones. Older items reach it through search_items()."""
     with conn() as c:
         opened = c.execute(
-            "SELECT * FROM items WHERE user_id=? AND status='open' ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM items WHERE user_id=? AND status='open'"
+            f" ORDER BY COALESCE(due_at,'9999') ASC, {_PRIORITY_ORDER}, id DESC LIMIT ?",
             (user_id, open_limit),
         ).fetchall()
         closed = c.execute(

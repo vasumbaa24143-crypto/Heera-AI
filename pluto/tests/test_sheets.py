@@ -466,6 +466,33 @@ def test_a_link_from_an_earlier_message_counts(google):
     assert reply.text == "The total is 500."
 
 
+def test_a_link_in_an_older_message_the_assistant_was_shown_by_search_counts(google, monkeypatch):
+    monkeypatch.setattr(core, "HISTORY_TURNS", 2)  # so the link falls outside the recent messages
+    google.rows = [["x"]]
+    link_message = f"budget sheet link: {URL}"
+    for role, text in [("user", link_message), ("pluto", "Noted"), ("user", "hello"), ("pluto", "Hi")]:
+        db.add_message(UID, role, text, now=NOW)
+    assistant = asks_to_read()
+    [reply] = core.chat(UID, "what's the total in the budget sheet?", assistant, NOW)
+    assert reply.text == "The total is 500."
+    first, second = assistant.calls
+    assert [m["text"] for m in first["history"]] == ["hello", "Hi"]
+    assert [m["text"] for m in first["related"]] == [link_message]
+    assert second["related"] == first["related"]  # the second ask sees the same conversation
+
+
+def test_a_link_only_pluto_wrote_does_not_count_even_when_search_finds_it(google, monkeypatch):
+    monkeypatch.setattr(core, "HISTORY_TURNS", 2)
+    other = f"https://docs.google.com/spreadsheets/d/{'Z' * 30}/edit"
+    for role, text in [("pluto", f"budget sheet: {other}"), ("user", "hello"), ("pluto", "Hi")]:
+        db.add_message(UID, role, text, now=NOW)
+    assistant = asks_to_read(other)
+    [reply] = core.chat(UID, "what's the total in the budget sheet?", assistant, NOW)
+    assert [m["text"] for m in assistant.calls[0]["related"]] == [f"budget sheet: {other}"]
+    assert reply.text == "I can only open a Google Sheets link you've sent me."
+    assert google.calls == []
+
+
 def test_the_assistant_cannot_make_pluto_open_a_link_the_user_did_not_send(google):
     other = f"https://docs.google.com/spreadsheets/d/{'Z' * 30}/edit"
     [reply] = core.chat(UID, "hello", asks_to_read(other), NOW)

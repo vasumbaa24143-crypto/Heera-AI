@@ -69,14 +69,20 @@ row (Google's version history may still hold it), and original messages stay out
   proposes (`reply`, `save`, `done`, `read`); core checks and applies.
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`. `db.on_change` is
-  called when an item is added, finished or deleted (the bot uses it for the Sheets log).
+  called when an item is added, finished or deleted (the bot uses it for the Sheets log). Full-text
+  search: external-content FTS5 indexes `items_fts` and `messages_fts`, kept in step by
+  triggers (so `/delete` and `/forget` also clear search), `unicode61` without Porter
+  stemming (Hinglish), `search_terms()` drops English/Hinglish filler words, and every word is
+  quoted so user text can't break FTS5 syntax. If FTS5 is missing (`db.HAS_FTS = False`),
+  search falls back to `LIKE`. `core.chat` sends open items + recent closed + search hits
+  (items and older messages) instead of the whole history.
 - `sheets.py` — Google Sheets: read a linked sheet, and keep the item log tab. Every Google call
   goes through `_call` and `_token`, so tests replace them.
 - `llm.py` — the assistant (`respond`) and its system prompt. Tries Gemini → Groq →
   Z AI → NVIDIA Nemotron until one returns valid JSON (`PLUTO_PROVIDERS` sets the order); if all fail,
   core saves the raw note (rule 5).
   `offline.py` — rule-based stand-in for `simulate.py --offline`. Any object with
-  `respond(message, history, items, now_local)` works as the assistant.
+  `respond(message, history, items, now_local, prefer=None, related=())` works as the assistant.
 - `stt.py` — voice-to-text: Groq Whisper → Gemini → Sarvam, whichever keys exist.
 - `tests/` — pytest with a fake assistant and fake Telegram objects; no network needed.
 
