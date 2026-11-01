@@ -224,6 +224,10 @@ Its prompt is `nanobot/templates/agent/consolidator_archive.md`. In short:
 
 ## 5. Design: daily digest
 
+> **Status: built** (`core.due_digests`, `core.build_digest`, `core.cmd_digest`, `db.digest_rows`,
+> `bot.digest_job`). One change from this design: with the digest on, stale ideas no longer get
+> separate nudges, because the digest already brings up one old idea a day.
+
 **Goal:** one morning message with what matters today, and silence when there's nothing to say.
 
 ### What's in it
