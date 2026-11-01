@@ -236,7 +236,11 @@ WHEN TO SAVE
   "Got it."). If all you did was note information, a very short acknowledgement is enough.
 
 ANSWERING QUESTIONS ABOUT THEIR STUFF
-- Use ONLY the saved items and the conversation given. Each open item has a "bucket" already
+- What you're given: every open item (the most urgent, if there are very many), recently
+  finished ones, older items whose words match the new message, the recent conversation, and
+  older messages whose words match (found by search). Search matches words, not meaning, so
+  if something isn't there, it may be saved under different words: say you couldn't find it.
+- Use ONLY the saved items and the messages given. Each open item has a "bucket" already
   worked out for you: overdue, today, tomorrow, this week, this month, later, or no date.
   - Order by urgency: overdue first, then by due time, and high-priority items before others
     in the same bucket. Mark high-priority items with 🔴.
@@ -245,8 +249,8 @@ ANSWERING QUESTIONS ABOUT THEIR STUFF
   - "This week": overdue, today, tomorrow and this week. "This month": also this month.
   - "Overall / sab kuch / what do I need to do": every open item, grouped sensibly.
   - Items with no date: mention them briefly when asked about overall plans, or if relevant.
-- "What have we discussed about X": look through the items and the conversation and summarise
-  what was said, with dates if useful.
+- "What have we discussed about X": look through the items, the recent conversation and the
+  older matching messages, and summarise what was said, with dates if useful.
 - Cite saved items as #id. Only cite ids that appear in the saved items.
 - If nothing matches, say so plainly. Never invent, guess or embellish a memory, a date, or an item.
 - For lists, use short lines, one item per line, most urgent first.
@@ -260,10 +264,14 @@ Keep replies short: one to four sentences, or a compact list. No markdown headin
 """
 
 
-def format_context(history: list, items: list) -> str:
-    convo = "\n".join(
-        f"[{m['when']}] {'User' if m['role'] == 'user' else 'Pluto'}: {m['text']}" for m in history
-    ) or "(no earlier conversation)"
+def _convo(msgs) -> str:
+    return "\n".join(
+        f"[{m['when']}] {'User' if m['role'] == 'user' else 'Pluto'}: {m['text']}" for m in msgs
+    )
+
+
+def format_context(history: list, items: list, related: list = ()) -> str:
+    convo = _convo(history) or "(no earlier conversation)"
     lines = []
     for it in items:
         due = f" | due {it['due_local']}" if it["due_local"] else ""
@@ -273,14 +281,18 @@ def format_context(history: list, items: list) -> str:
             f"  title: {it['title']}\n  original: {it['original_text']}"
         )
     saved = "\n".join(lines) or "(nothing saved yet)"
-    return f"Recent conversation:\n{convo}\n\nSaved items:\n{saved}"
+    out = f"Recent conversation:\n{convo}\n\nSaved items:\n{saved}"
+    if related:
+        out += f"\n\nOlder messages that match the new message (found by search):\n{_convo(related)}"
+    return out
 
 
-def respond(message: str, history: list, items: list, now_local: datetime, prefer=None) -> dict:
+def respond(message: str, history: list, items: list, now_local: datetime, prefer=None,
+            related=()) -> dict:
     data = _ask(
         SYSTEM,
         f"Current local time: {now_local:%A, %Y-%m-%d %H:%M}\n\n"
-        f"{format_context(history, items)}\n\nNew message from the user:\n{message}",
+        f"{format_context(history, items, related)}\n\nNew message from the user:\n{message}",
         prefer=prefer,
     )
     if not isinstance(data, dict):
