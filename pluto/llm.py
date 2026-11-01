@@ -4,6 +4,7 @@ Providers are tried in order until one gives a usable answer, so a rate limit,
 outage or bad output from one model doesn't stop Pluto thinking:
 
     Gemini (GEMINI_API_KEY) -> Groq (GROQ_API_KEY) -> Z AI (ZAI_API_KEY)
+    -> NVIDIA Nemotron (NVIDIA_API_KEY)
 
 Providers without a key are skipped. Set PLUTO_PROVIDERS (e.g. "groq,gemini")
 to change the order or leave some out; in chat, /model picks which one goes
@@ -12,6 +13,7 @@ first for that user. core.py needs respond(), and choices()/label() for /model.
 import json
 import logging
 import os
+import re
 from datetime import datetime
 
 import httpx
@@ -23,8 +25,15 @@ GROQ_URL = os.getenv("GROQ_URL", "https://api.groq.com/openai/v1/chat/completion
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 ZAI_URL = os.getenv("ZAI_URL", "https://api.z.ai/api/paas/v4/chat/completions")
 ZAI_MODEL = os.getenv("ZAI_MODEL", "glm-4.6")
-DEFAULT_ORDER = "gemini,groq,zai"
+NVIDIA_URL = os.getenv("NVIDIA_URL", "https://integrate.api.nvidia.com/v1/chat/completions")
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
+# Nemotron can "think" before answering: better reasoning, but much slower replies.
+NVIDIA_THINKING = os.getenv("NVIDIA_THINKING", "").strip().lower() in ("1", "true", "yes", "on")
+PROVIDERS = ("gemini", "groq", "zai", "nvidia")
+DEFAULT_ORDER = ",".join(PROVIDERS)
+KEY_NAMES = "GEMINI_API_KEY, GROQ_API_KEY, ZAI_API_KEY or NVIDIA_API_KEY"
 TIMEOUT = 45  # seconds per provider
+SLOW_TIMEOUT = 120  # for a large model that is thinking
 _client = None
 
 
@@ -35,14 +44,16 @@ class AllProvidersFailed(RuntimeError):
 def _key(name):
     if name == "zai":
         return os.getenv("ZAI_API_KEY") or os.getenv("Z_AI_API_KEY")
-    return os.getenv({"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}[name])
+    return os.getenv(
+        {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY", "nvidia": "NVIDIA_API_KEY"}[name]
+    )
 
 
 def providers(prefer=None) -> list:
     """Provider names to try, in order: those listed in PLUTO_PROVIDERS that have a key.
     `prefer` (chosen with /model) moves one provider to the front; the rest stay as backup."""
     order = [p.strip().lower() for p in os.getenv("PLUTO_PROVIDERS", DEFAULT_ORDER).split(",")]
-    names = [p for p in dict.fromkeys(order) if p in ("gemini", "groq", "zai") and _key(p)]
+    names = [p for p in dict.fromkeys(order) if p in PROVIDERS and _key(p)]
     if prefer in names:
         names.remove(prefer)
         names.insert(0, prefer)
@@ -51,7 +62,8 @@ def providers(prefer=None) -> list:
 
 def label(name) -> str:
     return {"gemini": f"Gemini ({MODEL})", "groq": f"Groq ({GROQ_MODEL})",
-            "zai": f"Z AI ({ZAI_MODEL})"}[name]
+            "zai": f"Z AI ({ZAI_MODEL})",
+            "nvidia": f"NVIDIA Nemotron ({NVIDIA_MODEL.split('/')[-1]})"}[name]
 
 
 def choices() -> list:
@@ -91,30 +103,50 @@ def _gemini(system: str, user: str) -> str:
     return text
 
 
-def _post(url, headers, payload):
+def _post(url, headers, payload, timeout=TIMEOUT):
     """One HTTP call; separated out so tests can replace it."""
-    r = httpx.post(url, headers=headers, json=payload, timeout=TIMEOUT)
+    r = httpx.post(url, headers=headers, json=payload, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
 
-def _openai_style(url: str, key: str, model: str, system: str, user: str) -> str:
-    """Groq and Z AI both speak the OpenAI chat-completions format."""
+def _openai_style(url, key, model, system, user, extra=None, timeout=TIMEOUT) -> str:
+    """Groq, Z AI and NVIDIA all speak the OpenAI chat-completions format."""
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "temperature": 0.4,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
+    }
+    payload.update(extra or {})
+    payload = {k: v for k, v in payload.items() if v is not None}  # None = leave the field out
     data = _post(
         url,
         {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        {
-            "model": model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "temperature": 0.4,
-            "max_tokens": 4096,
-            "response_format": {"type": "json_object"},
-        },
+        payload,
+        timeout,
     )
     text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
     if not text:
         raise ValueError("empty response from model")
-    return text
+    # Some reasoning models put their thinking inline; keep only the answer.
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+
+
+def _nvidia(system: str, user: str) -> str:
+    extra = {
+        # NVIDIA's hosted models don't all accept response_format; the prompt asks for JSON.
+        "response_format": None,
+        "top_p": 0.95,
+        "chat_template_kwargs": {"enable_thinking": NVIDIA_THINKING},
+    }
+    if NVIDIA_THINKING:
+        extra["max_tokens"] = 16384  # room for the reasoning plus the JSON
+    return _openai_style(
+        NVIDIA_URL, _key("nvidia"), NVIDIA_MODEL, system, user, extra,
+        SLOW_TIMEOUT if NVIDIA_THINKING else TIMEOUT,
+    )
 
 
 def _call(name: str, system: str, user: str) -> str:
@@ -122,6 +154,8 @@ def _call(name: str, system: str, user: str) -> str:
         return _gemini(system, user)
     if name == "groq":
         return _openai_style(GROQ_URL, _key("groq"), GROQ_MODEL, system, user)
+    if name == "nvidia":
+        return _nvidia(system, user)
     return _openai_style(ZAI_URL, _key("zai"), ZAI_MODEL, system, user)
 
 
@@ -129,7 +163,7 @@ def _ask(system: str, user: str, prefer=None) -> dict:
     """Try each provider until one returns valid JSON."""
     names = providers(prefer)
     if not names:
-        raise AllProvidersFailed("no AI provider key set (GEMINI_API_KEY, GROQ_API_KEY or ZAI_API_KEY)")
+        raise AllProvidersFailed(f"no AI provider key set ({KEY_NAMES})")
     errors = []
     for name in names:
         try:

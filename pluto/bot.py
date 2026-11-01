@@ -6,6 +6,7 @@ import asyncio
 import io
 import logging
 import os
+import sys
 
 from dotenv import load_dotenv
 
@@ -190,7 +191,7 @@ async def nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 def check_config() -> None:
     missing = [k for k in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID") if not os.getenv(k)]
     if not llm.providers():
-        missing.append("an AI key (GEMINI_API_KEY, GROQ_API_KEY or ZAI_API_KEY)")
+        missing.append(f"an AI key ({llm.KEY_NAMES})")
     if missing:
         raise SystemExit(
             f"Missing in .env: {', '.join(missing)}. Copy .env.example to .env and fill it in."
@@ -221,7 +222,35 @@ def build_app() -> Application:
     return app
 
 
+KEY_REPORT = [
+    ("TELEGRAM_BOT_TOKEN", "Telegram bot token", "required"),
+    ("ALLOWED_USER_ID", "your Telegram user id", "required"),
+    ("GEMINI_API_KEY", "Gemini", "AI"),
+    ("GROQ_API_KEY", "Groq", "AI"),
+    ("ZAI_API_KEY", "Z AI", "AI"),
+    ("NVIDIA_API_KEY", "NVIDIA Nemotron", "AI"),
+    ("SARVAM_API_KEY", "Sarvam (voice notes)", "optional"),
+]
+
+
+def key_report() -> str:
+    """Which keys are set, without ever showing their values."""
+    lines = ["Keys in .env (values are never shown):"]
+    for name, what, kind in KEY_REPORT:
+        val = os.getenv(name) or (os.getenv("Z_AI_API_KEY") if name == "ZAI_API_KEY" else None)
+        mark = "✓ set    " if val else ("✗ MISSING" if kind == "required" else "– not set")
+        lines.append(f"  {mark}  {name:<20} {what}" + ("  (required)" if kind == "required" else ""))
+    order = llm.describe()
+    lines.append(f"AI order: {order}")
+    if not llm.providers():
+        lines.append("✗ Set at least one AI key.")
+    return "\n".join(lines)
+
+
 def main() -> None:
+    if "--check" in sys.argv[1:]:
+        print(key_report())
+        return
     check_config()
     db.init()
     app = build_app()

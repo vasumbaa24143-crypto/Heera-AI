@@ -19,12 +19,13 @@ nudges until things are done. Read README.md for setup and behaviour.
    reply that cites an item id the user does not have is withheld (`core.chat`).
 3. **Ask before any outside action.** Pluto only ever messages its own user. It must not
    contact other people, post, buy, or call outside services beyond the AI providers
-   (Gemini, Groq, Z AI) and transcription (Sarvam) without the user saying yes first. The same goes for
+   (Gemini, Groq, Z AI, NVIDIA) and transcription (Sarvam) without the user saying yes first. The same goes for
    anyone working on this repo: ask before pushing, deploying, creating repos, or
    sending anything to an external service.
 4. **Keys only in `.env`.** API keys and tokens live in `.env` (local) or the host's
    environment variables (Railway). Never hard-code them, log them, put them in tests,
-   or commit `.env`. `.env.example` lists the names with empty values.
+   or commit `.env`. `.env.example` lists the names with empty values; add any new
+   key there and to `bot.KEY_REPORT` (a test checks they match).
 5. **If labelling fails, save it as a plain note.** Any error or malformed output from
    the assistant means: store the message as a `note` with the original text and tell
    the user (they can /delete it). A thought is never dropped.
@@ -51,7 +52,7 @@ at most 5 nudges per user per 24 hours.
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`.
 - `llm.py` — the assistant (`respond`) and its system prompt. Tries Gemini → Groq →
-  Z AI until one returns valid JSON (`PLUTO_PROVIDERS` sets the order); if all fail,
+  Z AI → NVIDIA Nemotron until one returns valid JSON (`PLUTO_PROVIDERS` sets the order); if all fail,
   core saves the raw note (rule 5).
   `offline.py` — rule-based stand-in for `simulate.py --offline`. Any object with
   `respond(message, history, items, now_local)` works as the assistant.
@@ -65,6 +66,7 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest                         # must pass before every commit
 python simulate.py --offline   # try the flow in the terminal, no keys needed
+python bot.py --check          # which keys are set in .env (never prints values)
 ```
 
 - Every rule above has a test; add one when you add behaviour.
