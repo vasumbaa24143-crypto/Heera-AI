@@ -384,15 +384,18 @@ def in_quiet_hours(now) -> bool:
 def due_nudges(now=None) -> list:
     """Nudges to send now, as (user_id, item_id, Reply).
 
-    The caller sends each one and then calls db.mark_nudged(item_id, user_id, now),
-    so a failed send is retried on the next run."""
+    A reminder's first alert goes out at the time the user asked for, even in
+    quiet hours. Repeats and stale-idea nudges wait for daytime and respect the
+    daily cap. The caller sends each one and then calls
+    db.mark_nudged(item_id, user_id, now), so a failed send is retried."""
     now = now or db.now_utc()
-    if in_quiet_hours(now):
-        return []
     out = []
-    for r, reason in db.pick_nudges(now):
-        if reason == "due":
+    for r, reason in db.pick_nudges(now, quiet=in_quiet_hours(now)):
+        if reason == "reminder":
             reply = Reply(f"⏰ Reminder: {r['title']} (#{r['id']})", item_buttons(r["id"]))
+        elif reason == "due":
+            reply = Reply(f"⏰ Still pending: {r['title']} (#{r['id']}) — due {fmt_due(r['due_at'])}",
+                          item_buttons(r["id"]))
         else:
             days = (now - db.from_str(r["created_at"])).days
             reply = Reply(

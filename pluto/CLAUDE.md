@@ -41,8 +41,10 @@ Also built in: only `ALLOWED_USER_ID` may use the bot (fail closed if unset); th
 assistant can mark only the user's own open items done; `/delete` removes an item,
 its nudge history and the chat messages it came from, for good; `/forget` clears the
 chat history; `/model` picks which AI provider goes first (saved per user, others
-stay as backup); `/export` returns items and conversation; no nudges 22:00–08:00 local;
-at most 5 nudges per user per 24 hours.
+stay as backup); `/export` returns items and conversation. A reminder's first alert
+always goes out at the time the user set (checked every minute), even at night and
+past the cap; repeat nudges and idea nudges wait out quiet hours (22:00–08:00) and are
+capped at 5 per user per 24 hours.
 
 ## Layout
 
@@ -56,7 +58,7 @@ at most 5 nudges per user per 24 hours.
   core saves the raw note (rule 5).
   `offline.py` — rule-based stand-in for `simulate.py --offline`. Any object with
   `respond(message, history, items, now_local)` works as the assistant.
-- `stt.py` — Sarvam speech-to-text.
+- `stt.py` — voice-to-text: Groq Whisper → Gemini → Sarvam, whichever keys exist.
 - `tests/` — pytest with a fake assistant and fake Telegram objects; no network needed.
 
 ## Working on it

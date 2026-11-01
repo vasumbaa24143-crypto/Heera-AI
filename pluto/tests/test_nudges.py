@@ -55,6 +55,9 @@ def test_due_nudge_message_and_buttons():
     [(uid, item_id, reply)] = core.due_nudges(NOW)
     assert (uid, item_id) == (UID, i)
     assert reply.text == f"⏰ Reminder: Send deck to Rahul (#{i})"
+    db.mark_nudged(i, UID, NOW)
+    [(_, _, repeat)] = core.due_nudges(NOW + 6 * H)
+    assert repeat.text.startswith(f"⏰ Still pending: Send deck to Rahul (#{i}) — due Mon 02 Nov")
     assert reply.buttons == [("✅ Done", f"done:{i}"), ("😴 +1 day", f"snz:{i}")]
 
 
@@ -108,30 +111,53 @@ def test_quiet_hours_boundaries():
     assert core.in_quiet_hours(ist(2026, 11, 3, 7, 59))
 
 
-def test_no_nudges_in_quiet_hours_and_they_wait_till_morning():
+def test_reminder_fires_at_its_time_even_at_night():
+    i = add(due=ist(2026, 11, 2, 23, 15))
+    assert run(ist(2026, 11, 2, 23, 14)) == []
+    assert run(ist(2026, 11, 2, 23, 15)) == [i]   # the time the user asked for
+
+
+def test_repeats_and_idea_nudges_wait_for_morning():
     i = add(due=ist(2026, 11, 2, 21, 0))
-    assert run(ist(2026, 11, 2, 23, 0)) == []
-    assert run(ist(2026, 11, 3, 7, 30)) == []
-    assert db.get_item(UID, i)["nudge_count"] == 0
+    idea = add(kind="idea", created=ist(2026, 10, 25, 9, 0))
+    assert run(ist(2026, 11, 2, 21, 0)) == [i, idea]   # first reminder + idea, daytime
+    assert run(ist(2026, 11, 3, 3, 30)) == []          # repeat due, but quiet hours
+    assert run(ist(2026, 11, 3, 7, 59)) == []
     assert run(ist(2026, 11, 3, 8, 0)) == [i]
 
 
 # ---------- daily cap ----------
 
-def test_daily_cap_is_5_per_user_per_24_hours():
+def test_reminders_the_user_set_are_never_capped():
     ids = [add(title=f"t{n}", due=NOW - (10 - n) * H) for n in range(7)]
+    assert run(NOW) == ids                       # all 7 first reminders go out
+
+
+def overdue_already_reminded(uid, n, when):
+    """n items whose first reminder went out at `when`."""
+    ids = []
+    for k in range(n):
+        i = add(uid, title=f"{uid}-{k}", due=when - (10 - k) * H)
+        db.mark_nudged(i, uid, when)
+        ids.append(i)
+    return ids
+
+
+def test_daily_cap_limits_repeat_nudges_to_5_per_24_hours():
+    earlier = NOW - 30 * H                       # first reminders were sent yesterday
+    ids = overdue_already_reminded(UID, 7, earlier)
     first = run(NOW)
     assert first == ids[:5]                      # oldest due first
     assert run(NOW + 7 * H) == []                # remaining 2 wait: cap reached
     later = run(NOW + 25 * H)
-    assert later[:2] == ids[5:]                  # never-nudged items go first
+    assert later[:2] == ids[5:]                  # least-nudged items go first
     assert len(later) == 5
 
 
 def test_daily_cap_is_per_user():
-    for n in range(6):
-        add(UID, title=f"u{n}", due=NOW - H)
-        add(OTHER, title=f"o{n}", due=NOW - H)
+    earlier = NOW - 30 * H
+    overdue_already_reminded(UID, 6, earlier)
+    overdue_already_reminded(OTHER, 6, earlier)
     out = core.due_nudges(NOW)
     assert sum(1 for uid, _, _ in out if uid == UID) == 5
     assert sum(1 for uid, _, _ in out if uid == OTHER) == 5
@@ -139,7 +165,7 @@ def test_daily_cap_is_per_user():
 
 def test_overdue_items_take_priority_over_stale_ideas_under_the_cap():
     ideas = [add(kind="idea", created=NOW - 10 * D) for _ in range(5)]
-    task = add(due=NOW - H)
+    [task] = overdue_already_reminded(UID, 1, NOW - 30 * H)
     picked = run(NOW)
     assert picked[0] == task and len(picked) == 5
     assert set(picked[1:]) < set(ideas)
