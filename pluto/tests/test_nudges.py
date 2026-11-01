@@ -54,7 +54,7 @@ def test_due_nudge_message_and_buttons():
     i = add(title="Send deck to Rahul", due=NOW - H)
     [(uid, item_id, reply)] = core.due_nudges(NOW)
     assert (uid, item_id) == (UID, i)
-    assert reply.text == f"⏰ Due: Send deck to Rahul (#{i})"
+    assert reply.text == f"⏰ Reminder: Send deck to Rahul (#{i})"
     assert reply.buttons == [("✅ Done", f"done:{i}"), ("😴 +1 day", f"snz:{i}")]
 
 

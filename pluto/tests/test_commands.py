@@ -3,7 +3,7 @@ import json
 
 import core
 import db
-from conftest import NOW, FakeLLM, labels
+from conftest import NOW
 
 UID, OTHER = 111, 222
 
@@ -41,6 +41,13 @@ def test_bad_arguments_show_usage():
     assert "can't find #99" in core.cmd_done(UID, "99").text
 
 
+def test_list_puts_high_priority_first_among_undated():
+    a = db.add_item(UID, "task", "normal one", "x", now=NOW)
+    b = db.add_item(UID, "task", "urgent one", "x", now=NOW, priority="high")
+    lines = core.cmd_list(UID).text.splitlines()
+    assert lines == [f"✅ #{b} 🔴 urgent one", f"✅ #{a} normal one"]
+
+
 def test_snooze_sets_a_day_and_only_for_open_items():
     i = add(UID)
     assert "Snoozed" in core.cmd_snooze(UID, str(i), NOW).text
@@ -50,29 +57,43 @@ def test_snooze_sets_a_day_and_only_for_open_items():
 
 
 def test_delete_removes_forever():
-    i = add(UID, "task", "Pay rent", "2026-11-01T04:30:00Z", text="pay rent to Sharma ji")
+    i = add(UID, "task", "Pay rent", "2026-11-01T04:30:00Z", text="remind me to pay rent\nkal 10 baje")
     db.mark_nudged(i, UID, NOW)
+    for role, text in [("user", "remind me to pay rent"), ("pluto", "Kab?"),
+                       ("user", "kal 10 baje"), ("user", "unrelated")]:
+        db.add_message(UID, role, text, now=NOW)
     assert core.cmd_delete(UID, str(i)).text == f"Deleted #{i} forever."
 
     assert db.get_item(UID, i) is None
-    assert json.loads(core.export_json(UID)) == []
-    with db.conn() as c:  # nothing left anywhere in the database
+    with db.conn() as c:  # item, its nudges and the messages it came from are gone
         assert c.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
         assert c.execute("SELECT COUNT(*) FROM nudges").fetchone()[0] == 0
-    llm = FakeLLM(labels(question=True))
-    core.capture(UID, "rent?", llm, NOW)
-    assert llm.answer_calls == []  # nothing to recall from
+    assert [m["text"] for m in db.recent_messages(UID)] == ["Kab?", "unrelated"]
     assert "can't find" in core.cmd_delete(UID, str(i)).text
 
 
-def test_export_has_everything_including_original_text():
+def test_forget_clears_chat_but_keeps_items():
+    i = add(UID)
+    db.add_message(UID, "user", "hello", now=NOW)
+    db.add_message(OTHER, "user", "theirs", now=NOW)
+    assert core.cmd_forget(UID).text == (
+        "Cleared our chat history (1 messages). Your saved items are untouched.")
+    assert db.recent_messages(UID) == []
+    assert [m["text"] for m in db.recent_messages(OTHER)] == ["theirs"]
+    assert db.get_item(UID, i) is not None
+
+
+def test_export_has_items_and_conversation():
     a = add(UID, "idea", "Podcast", text="ek podcast start karna hai")
     b = add(UID, "task", "Done thing")
     db.set_status(UID, b, "done")
     add(OTHER, "note", "not mine")
+    db.add_message(UID, "user", "ek podcast start karna hai", now=NOW)
+    db.add_message(OTHER, "user", "not mine", now=NOW)
     data = json.loads(core.export_json(UID))
-    assert [(r["id"], r["status"]) for r in data] == [(a, "open"), (b, "done")]
-    assert data[0]["original_text"] == "ek podcast start karna hai"
+    assert [(r["id"], r["status"]) for r in data["items"]] == [(a, "open"), (b, "done")]
+    assert data["items"][0]["original_text"] == "ek podcast start karna hai"
+    assert [m["text"] for m in data["messages"]] == ["ek podcast start karna hai"]
 
 
 def test_buttons():
@@ -102,4 +123,4 @@ def test_users_cannot_touch_each_others_items():
     assert db.get_item(OTHER, mine) is None
     assert f"#{theirs}" not in core.cmd_list(UID).text
     assert f"#{mine}" not in core.cmd_list(OTHER).text
-    assert [r["title"] for r in json.loads(core.export_json(OTHER))] == ["theirs"]
+    assert [r["title"] for r in json.loads(core.export_json(OTHER))["items"]] == ["theirs"]

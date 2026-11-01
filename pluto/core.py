@@ -4,16 +4,27 @@ bot.py (Telegram) and simulate.py (terminal) are thin adapters around this
 module, so both run exactly the same logic. Everything here is synchronous;
 the bot runs it in a worker thread.
 
-`llm` is any object with:
-    extract(text: str, now_local: datetime) -> dict
-    answer(question: str, items: list, now_local: datetime) -> str
+Every message goes to the assistant (`llm.respond`), which sees the recent
+conversation and the user's saved items and returns a reply plus actions:
+
+    {"reply": str,
+     "save": [{"kind", "title", "due_local", "priority", "uses_previous_message"}],
+     "done": [item_id, ...]}
+
+The code, not the model, decides what actually happens: actions are checked
+against the user's own items, saves are confirmed with real ids, and a reply
+that cites an item the user does not have is withheld.
+
+`llm` is any object with respond(message, history, items, now_local, prefer=None) -> dict,
+and choices() -> [(name, label)] for the /model menu.
 (llm.py talks to Gemini; offline.py and the tests provide stand-ins.)
 """
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import db
@@ -23,22 +34,33 @@ log = logging.getLogger("pluto")
 TZ = ZoneInfo(os.getenv("PLUTO_TZ", "Asia/Kolkata"))
 QUIET_START, QUIET_END = 22, 8  # no nudges from 22:00 to 08:00 local
 KIND_ICON = {"idea": "💡", "promise": "🤝", "task": "✅", "note": "📝"}
+ACTION_KINDS = ("task", "promise")  # created only when the user asks for them
+PRIORITY_MARK = {"high": "🔴 ", "normal": "", "low": "⚪ "}
 TITLE_MAX = 120
 MAX_REPLY = 4000  # Telegram's limit is 4096 characters
+HISTORY_TURNS = 100  # messages of conversation the assistant sees
 
 START_TEXT = (
-    "Pluto here. Just tell me anything — type it or send a voice note.\n\n"
-    "I will remember it, and nudge you if it needs follow-up.\n"
-    "Ask me later: “what was that YouTube idea?”\n\n"
-    "/list  open items\n/done <id>  mark done\n/snooze <id>  +1 day\n"
-    "/delete <id>  remove forever\n/export  download everything"
+    "Hi, I'm Pluto 👋 Talk to me like you would to an assistant.\n\n"
+    "I quietly remember useful things you tell me (facts, ideas, details).\n"
+    "For to-dos and reminders, just say so — and tell me if it's urgent:\n"
+    "• “remind me to call Rahul kal 5 baje”\n"
+    "• “todo: renew passport, urgent”\n\n"
+    "Then ask me things like:\n"
+    "• “what's on my plate today?” / “is hafte kya kya hai?”\n"
+    "• “what have we discussed about the YouTube idea?”\n\n"
+    "/list  open items · /done <id> · /snooze <id> (+1 day)\n"
+    "/delete <id>  remove forever · /forget  clear our chat history\n"
+    "/model  choose which AI thinks first\n"
+    "/export  download everything"
 )
 
 
 @dataclass
 class Reply:
     text: str
-    buttons: list = field(default_factory=list)  # [(label, callback_data), ...]
+    # [(label, callback_data), ...] shown as one row, or [[...], [...]] for several rows
+    buttons: list = field(default_factory=list)
 
 
 # ---------- formatting ----------
@@ -55,7 +77,8 @@ def fmt_due(due_utc) -> str:
 
 def item_line(r) -> str:
     due = f" — due {fmt_due(r['due_at'])}" if r["due_at"] else ""
-    return f"{KIND_ICON.get(r['kind'], '•')} #{r['id']} {r['title']}{due}"
+    mark = PRIORITY_MARK.get(r["priority"], "") if r["kind"] in ACTION_KINDS else ""
+    return f"{KIND_ICON.get(r['kind'], '•')} #{r['id']} {mark}{r['title']}{due}"
 
 
 def item_buttons(item_id: int, with_archive: bool = False) -> list:
@@ -69,7 +92,58 @@ def _short(text: str) -> str:
     return text if len(text) <= MAX_REPLY else text[: MAX_REPLY - 1] + "…"
 
 
-# ---------- capture ----------
+# ---------- time buckets ----------
+
+def bucket(due_utc, now) -> str:
+    """Where a due date falls relative to now, in local time.
+
+    One of: overdue, today, tomorrow, this week, this month, later, no date.
+    Worked out here so the assistant never has to do date arithmetic."""
+    if not due_utc:
+        return "no date"
+    d, n = to_local(db.from_str(due_utc)), to_local(now)
+    if d < n:
+        return "overdue"
+    if d.date() == n.date():
+        return "today"
+    if d.date() == n.date() + timedelta(days=1):
+        return "tomorrow"
+    if d.date() <= n.date() + timedelta(days=6 - n.weekday()):  # through Sunday
+        return "this week"
+    if (d.year, d.month) == (n.year, n.month):
+        return "this month"
+    return "later"
+
+
+def item_views(rows, now) -> list:
+    """Saved items as the assistant sees them: local times and a time bucket."""
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["id"],
+            "kind": r["kind"],
+            "priority": r["priority"],
+            "status": r["status"],
+            "title": r["title"],
+            "original_text": r["original_text"],
+            "saved_local": to_local(db.from_str(r["created_at"])).strftime("%a %Y-%m-%d %H:%M"),
+            "due_local": to_local(db.from_str(r["due_at"])).strftime("%a %Y-%m-%d %H:%M")
+            if r["due_at"] else None,
+            "bucket": bucket(r["due_at"], now) if r["status"] == "open" else r["status"],
+        })
+    return out
+
+
+def history_views(rows) -> list:
+    return [
+        {"role": r["role"],
+         "when": to_local(db.from_str(r["created_at"])).strftime("%a %Y-%m-%d %H:%M"),
+         "text": r["text"]}
+        for r in rows
+    ]
+
+
+# ---------- the conversation ----------
 
 def parse_due(due_local, tz=None):
     """'YYYY-MM-DDTHH:MM' in local time -> UTC string, or None if absent/invalid."""
@@ -84,75 +158,6 @@ def parse_due(due_local, tz=None):
     return db.to_str(dt)
 
 
-def _normalize(result) -> dict:
-    """Check the labeller's output; raise ValueError if it is unusable."""
-    if not isinstance(result, dict):
-        raise ValueError("labeller did not return an object")
-    items = result.get("items") or []
-    if not isinstance(items, list):
-        raise ValueError("items is not a list")
-    return {
-        "is_question": result.get("is_question") is True,
-        "items": [it for it in items if isinstance(it, dict)],
-    }
-
-
-def save_raw(uid, text, now) -> Reply:
-    item_id = db.add_item(uid, "note", text[:80], text, now=now)
-    return Reply(f"Saved as a plain note (#{item_id}). I could not label it just now.")
-
-
-def capture(uid, text, llm, now=None) -> list:
-    """Handle a free-text message: save it as item(s), or answer it as a recall question."""
-    now = now or db.now_utc()
-    text = (text or "").strip()
-    if not text:
-        return [Reply("Tell me something to remember.")]
-
-    try:
-        result = _normalize(llm.extract(text, to_local(now)))
-    except Exception:
-        # Never lose a thought: if labelling fails, keep it raw as a note.
-        log.exception("labelling failed; saving raw note")
-        return [save_raw(uid, text, now)]
-
-    if result["is_question"]:
-        return [recall(uid, text, llm, now)]
-
-    items = result["items"] or [{"kind": "note", "title": text[:80], "due_local": None}]
-    replies = []
-    for it in items:
-        kind = it.get("kind") if it.get("kind") in KIND_ICON else "note"
-        title = it.get("title") if isinstance(it.get("title"), str) else ""
-        title = (title.strip() or text[:80])[:TITLE_MAX]
-        due_utc = parse_due(it.get("due_local"))
-        item_id = db.add_item(uid, kind, title, text, due_utc, now=now)
-        row = db.get_item(uid, item_id)
-        follow_up = kind in ("task", "promise") or due_utc is not None
-        replies.append(
-            Reply(f"Saved. {item_line(row)}", item_buttons(item_id) if follow_up else [])
-        )
-    return replies
-
-
-def recall(uid, question, llm, now=None) -> Reply:
-    now = now or db.now_utc()
-    pool = db.recall_pool(uid)
-    if not pool:
-        # Nothing to search, so there is nothing to ask the model. Never invent a memory.
-        return Reply("I don't have anything saved yet, so I can't answer that.")
-    try:
-        ans = (llm.answer(question, pool, to_local(now)) or "").strip()
-    except Exception:
-        log.exception("recall failed")
-        ans = ""
-    if not ans:
-        return Reply("I could not search just now. Your items are safe — try /list.")
-    return Reply(_short(ans))
-
-
-# ---------- commands ----------
-
 def parse_id(arg):
     try:
         return int(str(arg).strip().lstrip("#"))
@@ -160,10 +165,119 @@ def parse_id(arg):
         return None
 
 
+def _normalize(result) -> dict:
+    """Check the assistant's output; raise ValueError if it is unusable."""
+    if not isinstance(result, dict):
+        raise ValueError("assistant did not return an object")
+    reply = result.get("reply") or ""
+    save = result.get("save") or []
+    done = result.get("done") or []
+    if not isinstance(reply, str) or not isinstance(save, list) or not isinstance(done, list):
+        raise ValueError("assistant output has the wrong shape")
+    return {
+        "reply": reply.strip(),
+        "save": [s for s in save if isinstance(s, dict)],
+        "done": [i for i in (parse_id(d) for d in done) if i is not None],
+    }
+
+
+def save_raw(uid, text, now) -> Reply:
+    item_id = db.add_item(uid, "note", text[:80], text, now=now)
+    return Reply(
+        f"I couldn't think properly just now, so I saved your message as a plain note "
+        f"(#{item_id}) to be safe. /delete {item_id} if you didn't need it."
+    )
+
+
+def _previous_user_message(history):
+    for m in reversed(history):
+        if m["role"] == "user":
+            return m["text"]
+    return None
+
+
+def _cited_ids(text) -> set:
+    return {int(n) for n in re.findall(r"#(\d+)", text)}
+
+
+def chat(uid, text, llm, now=None) -> list:
+    """Handle one free-text message from the user and return Pluto's replies."""
+    now = now or db.now_utc()
+    text = (text or "").strip()
+    if not text:
+        return [Reply("I'm listening — say anything 🙂")]
+
+    history = db.recent_messages(uid, HISTORY_TURNS)
+    rows = db.context_items(uid)
+    db.add_message(uid, "user", text, now=now)  # the user's words, kept as said
+
+    try:
+        result = _normalize(
+            llm.respond(text, history_views(history), item_views(rows, now), to_local(now),
+                        prefer=db.get_setting(uid, "model"))
+        )
+    except Exception:
+        # Never lose a thought: if the assistant fails, keep the message as a note.
+        log.exception("assistant failed; saving raw note")
+        reply = save_raw(uid, text, now)
+        db.add_message(uid, "pluto", reply.text, now=now)
+        return [reply]
+
+    known_ids = {r["id"] for r in rows}
+    open_ids = {r["id"] for r in rows if r["status"] == "open"}
+
+    # Mark done only items that really are this user's open items.
+    done_lines = []
+    for i in dict.fromkeys(result["done"]):
+        if i in open_ids and db.set_status(uid, i, "done"):
+            done_lines.append(f"✅ Marked #{i} done.")
+
+    # Save what the assistant decided to keep (information automatically;
+    # tasks, promises and reminders only when the user asked for them).
+    saved = []
+    prev = _previous_user_message(history)
+    for it in result["save"]:
+        kind = it.get("kind") if it.get("kind") in KIND_ICON else "note"
+        title = it.get("title") if isinstance(it.get("title"), str) else ""
+        title = (title.strip() or text[:80])[:TITLE_MAX]
+        due_utc = parse_due(it.get("due_local"))
+        original = text
+        if it.get("uses_previous_message") is True and prev:
+            original = f"{prev}\n{text}"  # e.g. "remind me to call Rahul" + "kal 5 baje"
+        priority = it.get("priority") if it.get("priority") in db.PRIORITIES else "normal"
+        item_id = db.add_item(uid, kind, title, original, due_utc, now=now, priority=priority)
+        saved.append(db.get_item(uid, item_id))
+
+    # Never invent a memory: withhold a reply that cites items the user doesn't have.
+    reply = result["reply"]
+    invented = _cited_ids(reply) - known_ids - {r["id"] for r in saved}
+    if invented:
+        log.warning("assistant cited unknown items %s; reply withheld", sorted(invented))
+        reply = "I couldn't find that in what you've saved with me."
+
+    replies = []
+    head = "\n".join(x for x in [reply, *done_lines] if x)
+    if head:
+        replies.append(Reply(_short(head)))
+    for r in saved:
+        follow_up = r["kind"] in ACTION_KINDS or r["due_at"] is not None
+        verb = "Added" if r["kind"] in ACTION_KINDS else "Noted"
+        replies.append(
+            Reply(f"{verb} {item_line(r)}", item_buttons(r["id"]) if follow_up else [])
+        )
+    if not replies:
+        replies.append(Reply("🙂"))
+
+    db.add_message(uid, "pluto", "\n".join(r.text for r in replies), now=now)
+    return replies
+
+
+# ---------- commands ----------
+
 def cmd_list(uid) -> Reply:
     rows = db.list_open(uid)
     if not rows:
-        return Reply("Nothing open. Tell me something to remember.")
+        return Reply("Nothing open. Say “remind me …” or “note: …” and I'll keep it.")
     return Reply(_short("\n".join(item_line(r) for r in rows)))
 
 
@@ -189,13 +303,61 @@ def cmd_delete(uid, arg) -> Reply:
     return Reply(f"Deleted #{i} forever." if db.delete_item(uid, i) else f"I can't find #{i}.")
 
 
+def cmd_forget(uid) -> Reply:
+    n = db.forget_messages(uid)
+    return Reply(f"Cleared our chat history ({n} messages). Your saved items are untouched.")
+
+
+def cmd_model(uid, llm, arg=None) -> Reply:
+    """/model: show the AI options as buttons, or pick one directly (/model groq)."""
+    options = llm.choices() if hasattr(llm, "choices") else []
+    if not options:
+        return Reply("There's no AI model to choose from right now (offline, or no AI keys set).")
+    if arg:
+        return choose_model(uid, llm, arg.strip().lower())
+    current = db.get_setting(uid, "model", "auto")
+    if current not in {n for n, _ in options}:
+        current = "auto"
+    names = " → ".join(lbl.split(" (")[0] for _, lbl in options)
+    buttons = [(("✓ " if current == "auto" else "") + f"⚡ Auto ({names})", "model:auto")]
+    buttons += [(("✓ " if current == n else "") + lbl, f"model:{n}") for n, lbl in options]
+    lines = [
+        "🧠 Which AI should think first? The others stay as backup if it's busy or down.",
+        "",
+        f"Now: {'Auto' if current == 'auto' else dict(options)[current]}",
+    ]
+    return Reply("\n".join(lines), [[b] for b in buttons])
+
+
+def choose_model(uid, llm, name) -> Reply:
+    options = dict(llm.choices() if hasattr(llm, "choices") else [])
+    if name == "auto":
+        db.set_setting(uid, "model", "auto")
+        order = " → ".join(lbl.split(" (")[0] for lbl in options.values())
+        return Reply(f"⚡ Auto: I'll use {order}, falling back in that order.")
+    if name not in options:
+        avail = ", ".join(["auto", *options]) or "none"
+        return Reply(f"I don't have “{name}” set up. Options: {avail}.")
+    db.set_setting(uid, "model", name)
+    others = [lbl.split(" (")[0] for n, lbl in options.items() if n != name]
+    verb = "stays" if len(others) == 1 else "stay"
+    backup = f" {' and '.join(others)} {verb} as backup." if others else ""
+    return Reply(f"🧠 Done — I'll think with {options[name]} first.{backup}")
+
+
 def export_json(uid) -> str:
-    return json.dumps(db.export_all(uid), ensure_ascii=False, indent=2)
+    return json.dumps(
+        {"items": db.export_all(uid), "messages": db.export_messages(uid)},
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
-def button(uid, data, now=None):
+def button(uid, data, now=None, llm=None):
     """Handle an inline-button press. Returns a Reply, or None for unknown data."""
     action, _, raw = (data or "").partition(":")
+    if action == "model":
+        return choose_model(uid, llm, raw) if llm is not None else None
     item_id = parse_id(raw)
     if item_id is None:
         return None
@@ -230,7 +392,7 @@ def due_nudges(now=None) -> list:
     out = []
     for r, reason in db.pick_nudges(now):
         if reason == "due":
-            reply = Reply(f"⏰ Due: {r['title']} (#{r['id']})", item_buttons(r["id"]))
+            reply = Reply(f"⏰ Reminder: {r['title']} (#{r['id']})", item_buttons(r["id"]))
         else:
             days = (now - db.from_str(r["created_at"])).days
             reply = Reply(

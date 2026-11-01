@@ -12,6 +12,8 @@ DB_PATH = os.getenv("PLUTO_DB", "pluto.db")
 FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 STATUSES = ("open", "done", "archived")
+PRIORITIES = ("high", "normal", "low")
+_PRIORITY_ORDER = "CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END"
 
 
 def now_utc() -> datetime:
@@ -52,15 +54,37 @@ def init() -> None:
                 created_at TEXT NOT NULL,
                 last_nudged_at TEXT,
                 nudge_count INTEGER NOT NULL DEFAULT 0,
-                snoozed_until TEXT
+                snoozed_until TEXT,
+                priority TEXT NOT NULL DEFAULT 'normal'  -- high | normal | low
             )"""
         )
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(items)")}
+        if "priority" not in cols:  # databases made before priorities existed
+            c.execute("ALTER TABLE items ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'")
         c.execute(
             """CREATE TABLE IF NOT EXISTS nudges(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 item_id INTEGER NOT NULL,
                 sent_at TEXT NOT NULL
+            )"""
+        )
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS messages(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL,            -- user | pluto
+                text TEXT NOT NULL,            -- never overwritten
+                created_at TEXT NOT NULL
+            )"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS messages_user ON messages(user_id, id)")
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS settings(
+                user_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (user_id, key)
             )"""
         )
         c.execute("CREATE INDEX IF NOT EXISTS items_user ON items(user_id, status)")
@@ -70,12 +94,14 @@ def init() -> None:
         c.execute("DELETE FROM items WHERE status='deleted'")
 
 
-def add_item(user_id, kind, title, original_text, due_at=None, now=None) -> int:
+def add_item(user_id, kind, title, original_text, due_at=None, now=None, priority="normal") -> int:
+    if priority not in PRIORITIES:
+        priority = "normal"
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO items(user_id, kind, title, original_text, due_at, created_at)"
-            " VALUES (?,?,?,?,?,?)",
-            (user_id, kind, title, original_text, due_at, to_str(now or now_utc())),
+            "INSERT INTO items(user_id, kind, title, original_text, due_at, created_at, priority)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (user_id, kind, title, original_text, due_at, to_str(now or now_utc()), priority),
         )
         return cur.lastrowid
 
@@ -91,7 +117,7 @@ def list_open(user_id, limit=30):
     with conn() as c:
         return c.execute(
             "SELECT * FROM items WHERE user_id=? AND status='open'"
-            " ORDER BY COALESCE(due_at,'9999') ASC, id DESC LIMIT ?",
+            f" ORDER BY COALESCE(due_at,'9999') ASC, {_PRIORITY_ORDER}, id DESC LIMIT ?",
             (user_id, limit),
         ).fetchall()
 
@@ -103,6 +129,74 @@ def recall_pool(user_id, limit=300):
             "SELECT * FROM items WHERE user_id=? ORDER BY id DESC LIMIT ?",
             (user_id, limit),
         ).fetchall()
+
+
+def context_items(user_id, open_limit=300, closed_limit=50):
+    """What the assistant gets to see: all open items plus the most recent closed ones."""
+    with conn() as c:
+        opened = c.execute(
+            "SELECT * FROM items WHERE user_id=? AND status='open' ORDER BY id DESC LIMIT ?",
+            (user_id, open_limit),
+        ).fetchall()
+        closed = c.execute(
+            "SELECT * FROM items WHERE user_id=? AND status!='open' ORDER BY id DESC LIMIT ?",
+            (user_id, closed_limit),
+        ).fetchall()
+    return sorted(opened + closed, key=lambda r: r["id"])
+
+
+# ---------- settings ----------
+
+def get_setting(user_id, key, default=None):
+    with conn() as c:
+        row = c.execute(
+            "SELECT value FROM settings WHERE user_id=? AND key=?", (user_id, key)
+        ).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(user_id, key, value) -> None:
+    with conn() as c:
+        c.execute(
+            "INSERT INTO settings(user_id, key, value) VALUES (?,?,?)"
+            " ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value",
+            (user_id, key, value),
+        )
+
+
+# ---------- conversation log ----------
+
+def add_message(user_id, role, text, now=None) -> int:
+    with conn() as c:
+        cur = c.execute(
+            "INSERT INTO messages(user_id, role, text, created_at) VALUES (?,?,?,?)",
+            (user_id, role, text, to_str(now or now_utc())),
+        )
+        return cur.lastrowid
+
+
+def recent_messages(user_id, limit=100):
+    """The last `limit` messages, oldest first."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+    return rows[::-1]
+
+
+def forget_messages(user_id) -> int:
+    """Clear the conversation log (saved items are kept)."""
+    with conn() as c:
+        return c.execute("DELETE FROM messages WHERE user_id=?", (user_id,)).rowcount
+
+
+def export_messages(user_id):
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM messages WHERE user_id=? ORDER BY id", (user_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def set_status(user_id, item_id, status) -> bool:
@@ -117,12 +211,21 @@ def set_status(user_id, item_id, status) -> bool:
 
 
 def delete_item(user_id, item_id) -> bool:
-    """Remove an item and its nudge history for good."""
+    """Remove an item, its nudge history, and the chat messages it was made from, for good."""
     with conn() as c:
-        cur = c.execute("DELETE FROM items WHERE id=? AND user_id=?", (item_id, user_id))
-        if cur.rowcount:
-            c.execute("DELETE FROM nudges WHERE item_id=? AND user_id=?", (item_id, user_id))
-        return cur.rowcount > 0
+        row = c.execute(
+            "SELECT original_text FROM items WHERE id=? AND user_id=?", (item_id, user_id)
+        ).fetchone()
+        if row is None:
+            return False
+        c.execute("DELETE FROM items WHERE id=? AND user_id=?", (item_id, user_id))
+        c.execute("DELETE FROM nudges WHERE item_id=? AND user_id=?", (item_id, user_id))
+        for line in row["original_text"].split("\n"):
+            c.execute(
+                "DELETE FROM messages WHERE user_id=? AND role='user' AND text=?",
+                (user_id, line),
+            )
+        return True
 
 
 def snooze(user_id, item_id, hours=24, now=None) -> bool:

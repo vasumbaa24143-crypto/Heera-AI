@@ -1,8 +1,15 @@
-# Pluto (codename) — phase 1
+# Pluto (codename)
 
-A Telegram bot that remembers what you tell it and nudges you until it is done.
+A personal assistant on Telegram that remembers what you tell it and nudges you until it is done.
 
-**Loop:** you type or speak → Gemini labels it (idea / promise / task / note) → saved in SQLite → you ask about it later → nudges when due or when an idea goes stale.
+You chat with it like a smart assistant, by text or voice note, in English, Hindi or Hinglish:
+
+- **Information is noted automatically.** "Rahul ka birthday 5 March ko hai" → 📝 noted.
+- **To-dos and reminders are added when you ask.** "remind me to call Rahul kal 5 baje", "todo: renew passport, urgent". Pluto asks "kab?" if a reminder has no time. If you just mention something you need to do, it offers to add it.
+- **Priority comes from your words.** "urgent", "zaroori", "jaldi" → 🔴 high; "no rush" → low.
+- **Ask about your plans.** "What's on my plate today?", "is hafte kya hai?", "this month", "overall what do I need to do?", "what have we discussed about the YouTube idea?" It answers only from what you saved and said.
+- **Tell it when things are done.** "Rahul ko deck bhej diya" → marks that item done.
+- **Nudges** when something is due, or when an idea goes untouched.
 
 ## Setup (about 10 minutes)
 
@@ -10,7 +17,7 @@ You need Python 3.11 or newer.
 
 1. In Telegram, message **@BotFather** → `/newbot` → copy the token.
 2. Message **@userinfobot** → copy your numeric user id.
-3. Get a Gemini API key (aistudio.google.com/apikey) and, for voice, a Sarvam key (dashboard.sarvam.ai).
+3. Get at least one AI key: Gemini (aistudio.google.com/apikey), Groq (console.groq.com/keys) or Z AI (z.ai). With more than one, Pluto falls back automatically when one is rate-limited or down. For voice, also get a Sarvam key (dashboard.sarvam.ai).
 4. Run:
 
 ```bash
@@ -21,15 +28,15 @@ python bot.py
 ```
 
 5. Open your bot in Telegram, send `/start`, then say something like:
-   - "kal shaam ko Rahul ko deck bhejna hai"
    - "YouTube pe tech news segment start karne ka idea hai"
-   - then ask: "YouTube wala idea kya tha?"
+   - "remind me kal shaam Rahul ko deck bhejna hai"
+   - then ask: "aaj aur kal kya kya hai?" or "YouTube wala idea kya tha?"
 
 ## Try it without Telegram
 
 ```bash
-python simulate.py --offline   # no keys, no network: simple built-in labeller
-python simulate.py             # same, but labels with Gemini (needs GEMINI_API_KEY)
+python simulate.py --offline   # no keys, no network: simple built-in assistant
+python simulate.py             # same, but with your AI keys from .env
 ```
 
 It runs the same flow as the bot (`core.py`) with its own `simulate.db`. Buttons appear as
@@ -42,11 +49,11 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests use a fake labeller and fake Telegram objects, so they need no keys or network.
+The tests use a fake assistant and fake Telegram objects, so they need no keys or network.
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/export` (JSON download)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/forget` (clear chat history) · `/model` (choose which AI thinks first) · `/export` (JSON download of items and chat)
 
 ## How nudges work
 
@@ -69,6 +76,6 @@ The bot must be running to nudge.
 
 ## Known limits
 
-- Recall sends your recent 300 items to the model; add embeddings only when this gets slow.
+- Each message sends the last 100 chat messages and your open items (plus 50 recent closed ones) to the model. "What have we discussed" only reaches that far back in the chat; saved items are always included. Add search/embeddings when this gets slow or costly.
 - Check `stt.py` against Sarvam's current docs; the model name and field names are env-configurable.
-- The Gemini model defaults to `gemini-2.5-flash`; change `PLUTO_MODEL` if Google retires it.
+- AI providers are tried in order Gemini → Groq → Z AI (`PLUTO_PROVIDERS` changes it, and `/model` in chat picks which one goes first; the rest stay as backup). Default models: `gemini-2.5-flash`, `llama-3.3-70b-versatile` (Groq), `glm-4.6` (Z AI); change `PLUTO_MODEL`, `GROQ_MODEL`, `ZAI_MODEL` if a provider retires one. Fallback models may phrase replies differently, but the code-side checks (what gets saved, never citing unknown items) apply to all of them.
