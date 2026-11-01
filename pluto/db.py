@@ -279,7 +279,7 @@ def nudges_last_24h(user_id, now=None) -> int:
         ).fetchone()[0]
 
 
-def pick_nudges(now=None, quiet=False):
+def pick_nudges(now=None, quiet=False, idea_nudges=lambda uid: True):
     """Return (item_row, reason) pairs that should be nudged now.
 
     reason is:
@@ -288,7 +288,8 @@ def pick_nudges(now=None, quiet=False):
       'due'      - a repeat nudge for an item still open after its due time;
       'stale'    - an idea left untouched for a while.
     Repeats and stale ideas respect the daily cap (per user) and are held back
-    while `quiet` (quiet hours) is true. Overdue items go before stale ideas;
+    while `quiet` (quiet hours) is true. `idea_nudges(uid)` says whether that user
+    gets separate stale-idea nudges. Overdue items go before stale ideas;
     within each, items nudged the fewest times go first, then the oldest."""
     now = now or now_utc()
     now_s = to_str(now)
@@ -312,7 +313,7 @@ def pick_nudges(now=None, quiet=False):
                 and (last is None or now - last >= timedelta(hours=DUE_GAP_HOURS))
             ):
                 candidates.append((0, r["nudge_count"], r["due_at"], r["id"], r, "due"))
-        elif r["kind"] == "idea":
+        elif r["kind"] == "idea" and idea_nudges(r["user_id"]):
             age = now - from_str(r["created_at"])
             if (
                 age >= timedelta(days=IDEA_AFTER_DAYS)
@@ -337,6 +338,50 @@ def pick_nudges(now=None, quiet=False):
         per_user[uid] += 1
         picked.append((r, reason))
     return picked
+
+
+# ---------- daily digest ----------
+
+def count_items(user_id) -> int:
+    with conn() as c:
+        return c.execute("SELECT COUNT(*) FROM items WHERE user_id=?", (user_id,)).fetchone()[0]
+
+
+def digest_rows(user_id, now, end_of_day, idea_older_than):
+    """Rows for the morning digest: (overdue, due_today, one_old_idea_or_None).
+
+    Snoozed, done and archived items are left out. `end_of_day` is local midnight
+    (as UTC). The idea is the open idea created before `idea_older_than` that was
+    least recently shown, and not shown since `idea_older_than`."""
+    now_s, eod_s, old_s = to_str(now), to_str(end_of_day), to_str(idea_older_than)
+    awake = "status='open' AND (snoozed_until IS NULL OR snoozed_until<=?)"
+    with conn() as c:
+        overdue = c.execute(
+            f"SELECT * FROM items WHERE user_id=? AND {awake} AND due_at IS NOT NULL AND due_at<?"
+            " ORDER BY due_at, id",
+            (user_id, now_s, now_s),
+        ).fetchall()
+        today = c.execute(
+            f"SELECT * FROM items WHERE user_id=? AND {awake} AND due_at>=? AND due_at<?"
+            " ORDER BY due_at, id",
+            (user_id, now_s, now_s, eod_s),
+        ).fetchall()
+        idea = c.execute(
+            f"SELECT * FROM items WHERE user_id=? AND {awake} AND kind='idea' AND due_at IS NULL"
+            " AND created_at<=? AND (last_nudged_at IS NULL OR last_nudged_at<=?)"
+            " ORDER BY COALESCE(last_nudged_at, created_at), id LIMIT 1",
+            (user_id, now_s, old_s, old_s),
+        ).fetchone()
+    return overdue, today, idea
+
+
+def touch_nudged(item_id, user_id, now=None) -> None:
+    """Record that an item was shown (e.g. in the digest) without using the daily nudge cap."""
+    with conn() as c:
+        c.execute(
+            "UPDATE items SET last_nudged_at=?, nudge_count=nudge_count+1 WHERE id=? AND user_id=?",
+            (to_str(now or now_utc()), item_id, user_id),
+        )
 
 
 def mark_nudged(item_id, user_id, now=None) -> None:

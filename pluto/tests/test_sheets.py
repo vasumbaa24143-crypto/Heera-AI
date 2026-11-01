@@ -585,12 +585,13 @@ def test_the_sheet_job_updates_the_log(google, monkeypatch):
 def test_the_bot_starts_the_sheet_job_only_when_the_log_is_on(google, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST-not-a-real-token")
     app = bot.build_app()
-    assert {j.name for j in app.job_queue.jobs()} == {"nudge_job", "sheet_job"}
+    assert {j.name for j in app.job_queue.jobs()} == {"nudge_job", "digest_job", "sheet_job"}
     assert db.on_change is sheets.mark_dirty and sheets.due()  # it starts by catching up
     monkeypatch.delenv("PLUTO_LOG_SHEET_ID")
     monkeypatch.setattr(db, "on_change", None)
     app = bot.build_app()
-    assert {j.name for j in app.job_queue.jobs()} == {"nudge_job"} and db.on_change is None
+    assert {j.name for j in app.job_queue.jobs()} == {"nudge_job", "digest_job"}
+    assert db.on_change is None
 
 
 def test_the_key_check_says_who_to_share_sheets_with(google):

@@ -254,7 +254,7 @@ def test_config_accepts_any_one_ai_key(monkeypatch):
 def test_app_builds_with_all_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST-not-a-real-token")
     app = bot.build_app()
-    assert sum(len(h) for h in app.handlers.values()) == 11
+    assert sum(len(h) for h in app.handlers.values()) == 12
     assert app.job_queue is not None  # needs python-telegram-bot[job-queue]
 
 

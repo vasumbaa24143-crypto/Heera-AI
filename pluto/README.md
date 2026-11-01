@@ -9,7 +9,7 @@ You chat with it like a smart assistant, by text or voice note, in English, Hind
 - **Priority comes from your words.** "urgent", "zaroori", "jaldi" → 🔴 high; "no rush" → low.
 - **Ask about your plans.** "What's on my plate today?", "is hafte kya hai?", "this month", "overall what do I need to do?", "what have we discussed about the YouTube idea?" It answers only from what you saved and said.
 - **Tell it when things are done.** "Rahul ko deck bhej diya" → marks that item done.
-- **Nudges** when something is due, or when an idea goes untouched.
+- **Reminders on time**, follow-up nudges if something stays open, and a **morning digest**.
 - **Google Sheets (optional).** Send a link to a sheet and ask about it, and Pluto reads it. It can also keep a copy of your items in a sheet of your own. See "Google Sheets" below.
 
 ## Setup (about 10 minutes)
@@ -55,13 +55,39 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/forget` (clear chat history) · `/model` (choose which AI thinks first) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/forget` (clear chat history) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
+
+## Morning digest
+
+One message each morning (08:30 by default, in `PLUTO_TZ`):
+
+```
+☀️ Good morning! Here's your day (Tue 03 Nov):
+
+⚠️ Overdue (2)
+• #14 🔴 Renew passport (was due Sun 01 Nov, 10:00)
+• #9 Send deck to Rahul (was due Mon 02 Nov, 18:00)
+
+📅 Today (1)
+• #21 Call bank — 15:00
+
+💡 From a while back
+• #4 YouTube tech news segment (you told me 12 days ago). Still interested?
+```
+
+- Built straight from your saved items, with no AI call, so it costs nothing and can't invent anything.
+- **Skipped when there's nothing to say.** Never more than one a day, and nothing until you've saved something.
+- Up to 5 items per section ("…and N more — /list"). It has ✅ buttons for the items and a 🗄 Drop button for the idea.
+- One old idea a day: at least a week old and not shown in the last week, taking turns.
+- If the bot was off at digest time, it catches up within 4 hours; later than that, it skips the day.
+- Items due later today still get their own reminder at their time. Overdue items shown in the digest don't get a repeat nudge right after it.
+- With the digest on, old ideas come up only in the digest. With `/digest off`, they get their own nudges as before.
 
 ## How reminders and nudges work
 
 - Checked every minute while the bot is running.
 - **A reminder you set always arrives at the time you asked for**, even at night, and doesn't count against any limit.
-- If it's still open afterwards, Pluto nudges again every 6 hours (up to 5 times). Ideas you haven't touched get a nudge after 3 days, then every 3 days (up to 3 times).
+- If it's still open afterwards, Pluto nudges again every 6 hours (up to 5 times). With the digest off, ideas you haven't touched get a nudge after 3 days, then every 3 days (up to 3 times).
 - Those follow-up nudges wait until morning (no follow-ups 22:00–08:00, `QUIET_START/END` in `core.py`) and are capped at 5 per 24 hours.
 - Done / Snooze / Drop buttons on every nudge.
 - Your computer must be awake with `python bot.py` running for reminders to arrive. To get them when your Mac is asleep, deploy it (see below).
