@@ -218,14 +218,14 @@ def test_nudge_job_respects_quiet_hours(monkeypatch):
 
 def test_config_check(monkeypatch):
     for k in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID", "GEMINI_API_KEY", "GROQ_API_KEY",
-              "ZAI_API_KEY", "Z_AI_API_KEY", "PLUTO_PROVIDERS"):
+              "ZAI_API_KEY", "Z_AI_API_KEY", "NVIDIA_API_KEY", "PLUTO_PROVIDERS"):
         monkeypatch.delenv(k, raising=False)
     with pytest.raises(SystemExit, match="TELEGRAM_BOT_TOKEN, ALLOWED_USER_ID, an AI key"):
         bot.check_config()
 
 
 def test_config_accepts_any_one_ai_key(monkeypatch):
-    for k in ("GEMINI_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "PLUTO_PROVIDERS"):
+    for k in ("GEMINI_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "NVIDIA_API_KEY", "PLUTO_PROVIDERS"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
     monkeypatch.setenv("ALLOWED_USER_ID", str(ME))
@@ -238,3 +238,26 @@ def test_app_builds_with_all_handlers(monkeypatch):
     app = bot.build_app()
     assert sum(len(h) for h in app.handlers.values()) == 11
     assert app.job_queue is not None  # needs python-telegram-bot[job-queue]
+
+
+def test_env_example_has_a_slot_for_every_key():
+    import pathlib
+    names = {ln.split("=")[0] for ln in
+             (pathlib.Path(bot.__file__).parent / ".env.example").read_text().splitlines()
+             if ln and not ln.startswith("#") and "=" in ln}
+    assert names == {n for n, _, _ in bot.KEY_REPORT}
+
+
+def test_key_check_lists_every_key_and_never_shows_values(monkeypatch):
+    for n, _, _ in bot.KEY_REPORT:
+        monkeypatch.delenv(n, raising=False)
+    monkeypatch.delenv("Z_AI_API_KEY", raising=False)
+    monkeypatch.delenv("PLUTO_PROVIDERS", raising=False)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:SECRET-TG")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-SECRET")
+    out = bot.key_report()
+    for n, _, _ in bot.KEY_REPORT:
+        assert n in out
+    assert "SECRET" not in out
+    assert "✓ set      NVIDIA_API_KEY" in out and "✗ MISSING  ALLOWED_USER_ID" in out
+    assert "AI order: NVIDIA Nemotron" in out

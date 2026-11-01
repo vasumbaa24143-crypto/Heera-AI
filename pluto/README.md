@@ -17,13 +17,14 @@ You need Python 3.11 or newer.
 
 1. In Telegram, message **@BotFather** → `/newbot` → copy the token.
 2. Message **@userinfobot** → copy your numeric user id.
-3. Get at least one AI key: Gemini (aistudio.google.com/apikey), Groq (console.groq.com/keys) or Z AI (z.ai). With more than one, Pluto falls back automatically when one is rate-limited or down. For voice, also get a Sarvam key (dashboard.sarvam.ai).
+3. Get at least one AI key: Gemini (aistudio.google.com/apikey), Groq (console.groq.com/keys), Z AI (z.ai) or NVIDIA Nemotron (build.nvidia.com → Get API Key). With more than one, Pluto falls back automatically when one is rate-limited or down. For voice, also get a Sarvam key (dashboard.sarvam.ai).
 4. Run:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env      # then fill in the values
+python bot.py --check     # shows which keys are set (never their values)
 python bot.py
 ```
 
@@ -78,4 +79,4 @@ The bot must be running to nudge.
 
 - Each message sends the last 100 chat messages and your open items (plus 50 recent closed ones) to the model. "What have we discussed" only reaches that far back in the chat; saved items are always included. Add search/embeddings when this gets slow or costly.
 - Check `stt.py` against Sarvam's current docs; the model name and field names are env-configurable.
-- AI providers are tried in order Gemini → Groq → Z AI (`PLUTO_PROVIDERS` changes it, and `/model` in chat picks which one goes first; the rest stay as backup). Default models: `gemini-2.5-flash`, `llama-3.3-70b-versatile` (Groq), `glm-4.6` (Z AI); change `PLUTO_MODEL`, `GROQ_MODEL`, `ZAI_MODEL` if a provider retires one. Fallback models may phrase replies differently, but the code-side checks (what gets saved, never citing unknown items) apply to all of them.
+- AI providers are tried in order Gemini → Groq → Z AI → NVIDIA Nemotron (`PLUTO_PROVIDERS` changes it, and `/model` in chat picks which one goes first; the rest stay as backup). Default models: `gemini-2.5-flash`, `llama-3.3-70b-versatile` (Groq), `glm-4.6` (Z AI), `nvidia/nemotron-3.5-super-vl-120b-a12b` (NVIDIA, with thinking off for quick replies; `NVIDIA_THINKING=1` turns it on); change `PLUTO_MODEL`, `GROQ_MODEL`, `ZAI_MODEL`, `NVIDIA_MODEL` if a provider retires one. Fallback models may phrase replies differently, but the code-side checks (what gets saved, never citing unknown items) apply to all of them.

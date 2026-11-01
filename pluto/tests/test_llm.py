@@ -19,7 +19,8 @@ class FakeModels:
         return SimpleNamespace(text=self.text)
 
 
-KEYS = ("GEMINI_API_KEY", "GROQ_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "PLUTO_PROVIDERS")
+KEYS = ("GEMINI_API_KEY", "GROQ_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "NVIDIA_API_KEY",
+        "PLUTO_PROVIDERS")
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +92,7 @@ def test_garbage_raises_so_core_saves_a_raw_note(gemini):
 
 def test_no_key_at_all_is_a_clear_error(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY")
-    with pytest.raises(llm.AllProvidersFailed, match="GEMINI_API_KEY, GROQ_API_KEY or ZAI_API_KEY"):
+    with pytest.raises(llm.AllProvidersFailed, match="GEMINI_API_KEY, GROQ_API_KEY, ZAI_API_KEY or NVIDIA_API_KEY"):
         llm.respond("x", [], [], core.to_local(NOW))
 
 
@@ -103,13 +104,14 @@ class FakeHTTP:
     def __init__(self, answers):
         self.answers, self.calls = answers, []
 
-    def __call__(self, url, headers, payload):
-        self.calls.append(SimpleNamespace(url=url, headers=headers, payload=payload))
+    def __call__(self, url, headers, payload, timeout=None):
+        self.calls.append(SimpleNamespace(url=url, headers=headers, payload=payload, timeout=timeout))
         for frag, ans in self.answers.items():
             if frag in url:
                 if isinstance(ans, Exception):
                     raise ans
-                return {"choices": [{"message": {"content": json.dumps(ans)}}]}
+                content = ans if isinstance(ans, str) else json.dumps(ans)
+                return {"choices": [{"message": {"content": content}}]}
         raise AssertionError(f"unexpected URL {url}")
 
 
@@ -130,6 +132,8 @@ def test_providers_follow_keys_and_order(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "g")
     monkeypatch.setenv("Z_AI_API_KEY", "z")  # alternative spelling works too
     assert llm.providers() == ["gemini", "groq", "zai"]
+    monkeypatch.setenv("NVIDIA_API_KEY", "n")
+    assert llm.providers() == ["gemini", "groq", "zai", "nvidia"]
     monkeypatch.setenv("PLUTO_PROVIDERS", "zai, groq,bogus")
     assert llm.providers() == ["zai", "groq"]
     assert llm.describe().startswith("Z AI")
@@ -196,3 +200,42 @@ def test_keys_never_reach_the_log(monkeypatch, caplog):
             llm.respond("hi", [], [], core.to_local(NOW))
     logged = caplog.text + str(e.value)
     assert "SECRET-GROQ" not in logged and "test-gemini-key" not in logged
+
+
+# ---------- NVIDIA Nemotron ----------
+
+def test_zai_failure_falls_back_to_nvidia(monkeypatch):
+    for k in ("GROQ_API_KEY", "ZAI_API_KEY"):
+        monkeypatch.setenv(k, "x")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-nvidia-key")
+    broken_gemini(monkeypatch)
+    http = FakeHTTP({"groq.com": RuntimeError("429"), "z.ai": RuntimeError("down"),
+                     "nvidia.com": {"reply": "Nemotron here"}})
+    monkeypatch.setattr(llm, "_post", http)
+    assert llm.respond("hi", [], [], core.to_local(NOW))["reply"] == "Nemotron here"
+    call = http.calls[-1]
+    assert call.url == "https://integrate.api.nvidia.com/v1/chat/completions"
+    assert call.headers["Authorization"] == "Bearer test-nvidia-key"
+    assert call.payload["model"] == "nvidia/nemotron-3.5-super-vl-120b-a12b"
+    assert "response_format" not in call.payload  # not every NVIDIA model accepts it
+    assert call.payload["chat_template_kwargs"] == {"enable_thinking": False}
+    assert call.payload["max_tokens"] == 4096 and call.timeout == llm.TIMEOUT
+
+
+def test_nvidia_thinking_mode_and_inline_thoughts_are_stripped(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY")
+    monkeypatch.setenv("NVIDIA_API_KEY", "n")
+    monkeypatch.setattr(llm, "NVIDIA_THINKING", True)
+    answer = '<think>The user greets me {so} I reply.</think>\n{"reply": "Namaste!"}'
+    http = FakeHTTP({"nvidia.com": answer})
+    monkeypatch.setattr(llm, "_post", http)
+    assert llm.respond("namaste", [], [], core.to_local(NOW))["reply"] == "Namaste!"
+    call = http.calls[0]
+    assert call.payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert call.payload["max_tokens"] == 16384 and call.timeout == llm.SLOW_TIMEOUT
+
+
+def test_nvidia_appears_in_model_menu(monkeypatch):
+    monkeypatch.setenv("NVIDIA_API_KEY", "n")
+    assert ("nvidia", "NVIDIA Nemotron (nemotron-3.5-super-vl-120b-a12b)") in llm.choices()
+    assert llm.providers("nvidia")[0] == "nvidia"
