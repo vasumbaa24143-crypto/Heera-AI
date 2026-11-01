@@ -1,14 +1,66 @@
 """The assistant: reads one message in context and decides what to say and do.
 
-Uses Google Gemini (google-genai SDK). Swap this file to change the model
-provider; core.py only needs respond().
+Providers are tried in order until one gives a usable answer, so a rate limit,
+outage or bad output from one model doesn't stop Pluto thinking:
+
+    Gemini (GEMINI_API_KEY) -> Groq (GROQ_API_KEY) -> Z AI (ZAI_API_KEY)
+
+Providers without a key are skipped. Set PLUTO_PROVIDERS (e.g. "groq,gemini")
+to change the order or leave some out; in chat, /model picks which one goes
+first for that user. core.py needs respond(), and choices()/label() for /model.
 """
 import json
+import logging
 import os
 from datetime import datetime
 
-MODEL = os.getenv("PLUTO_MODEL", "gemini-2.5-flash")
+import httpx
+
+log = logging.getLogger("pluto")
+
+MODEL = os.getenv("PLUTO_MODEL", "gemini-2.5-flash")  # Gemini model
+GROQ_URL = os.getenv("GROQ_URL", "https://api.groq.com/openai/v1/chat/completions")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+ZAI_URL = os.getenv("ZAI_URL", "https://api.z.ai/api/paas/v4/chat/completions")
+ZAI_MODEL = os.getenv("ZAI_MODEL", "glm-4.6")
+DEFAULT_ORDER = "gemini,groq,zai"
+TIMEOUT = 45  # seconds per provider
 _client = None
+
+
+class AllProvidersFailed(RuntimeError):
+    pass
+
+
+def _key(name):
+    if name == "zai":
+        return os.getenv("ZAI_API_KEY") or os.getenv("Z_AI_API_KEY")
+    return os.getenv({"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}[name])
+
+
+def providers(prefer=None) -> list:
+    """Provider names to try, in order: those listed in PLUTO_PROVIDERS that have a key.
+    `prefer` (chosen with /model) moves one provider to the front; the rest stay as backup."""
+    order = [p.strip().lower() for p in os.getenv("PLUTO_PROVIDERS", DEFAULT_ORDER).split(",")]
+    names = [p for p in dict.fromkeys(order) if p in ("gemini", "groq", "zai") and _key(p)]
+    if prefer in names:
+        names.remove(prefer)
+        names.insert(0, prefer)
+    return names
+
+
+def label(name) -> str:
+    return {"gemini": f"Gemini ({MODEL})", "groq": f"Groq ({GROQ_MODEL})",
+            "zai": f"Z AI ({ZAI_MODEL})"}[name]
+
+
+def choices() -> list:
+    """(name, label) for every provider that has a key, for the /model menu."""
+    return [(n, label(n)) for n in providers()]
+
+
+def describe(prefer=None) -> str:
+    return " → ".join(label(p) for p in providers(prefer)) or "no provider configured"
 
 
 def _c():
@@ -23,7 +75,7 @@ def _c():
     return _client
 
 
-def _generate(system: str, user: str) -> str:
+def _gemini(system: str, user: str) -> str:
     from google.genai import types
 
     config = types.GenerateContentConfig(
@@ -39,6 +91,62 @@ def _generate(system: str, user: str) -> str:
     return text
 
 
+def _post(url, headers, payload):
+    """One HTTP call; separated out so tests can replace it."""
+    r = httpx.post(url, headers=headers, json=payload, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+
+def _openai_style(url: str, key: str, model: str, system: str, user: str) -> str:
+    """Groq and Z AI both speak the OpenAI chat-completions format."""
+    data = _post(
+        url,
+        {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        {
+            "model": model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "temperature": 0.4,
+            "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        },
+    )
+    text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+    if not text:
+        raise ValueError("empty response from model")
+    return text
+
+
+def _call(name: str, system: str, user: str) -> str:
+    if name == "gemini":
+        return _gemini(system, user)
+    if name == "groq":
+        return _openai_style(GROQ_URL, _key("groq"), GROQ_MODEL, system, user)
+    return _openai_style(ZAI_URL, _key("zai"), ZAI_MODEL, system, user)
+
+
+def _ask(system: str, user: str, prefer=None) -> dict:
+    """Try each provider until one returns valid JSON."""
+    names = providers(prefer)
+    if not names:
+        raise AllProvidersFailed("no AI provider key set (GEMINI_API_KEY, GROQ_API_KEY or ZAI_API_KEY)")
+    errors = []
+    for name in names:
+        try:
+            data = _json_from(_call(name, system, user))
+        except Exception as e:  # rate limit, outage, timeout, bad JSON: try the next one
+            # Log only the error type and status, never request headers (they hold the key).
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            log.warning("%s failed (%s%s); trying next provider",
+                        name, type(e).__name__, f" {status}" if status else "")
+            errors.append(f"{name}: {type(e).__name__}")
+            continue
+        if name != names[0]:
+            log.info("answered by fallback provider %s", name)
+        return data
+    raise AllProvidersFailed("all providers failed: " + ", ".join(errors))
+
+
 def _json_from(text: str) -> dict:
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1:
@@ -50,7 +158,7 @@ SYSTEM = """You are Pluto, the user's personal assistant on Telegram. You are wa
 like a capable human assistant who knows their life. The user writes in English, Hindi or Hinglish
 (Hindi in Latin script). Always reply in the same language and script they used.
 
-You are given: the current local time, the recent conversation, the user's saved items, and their
+Return a single JSON object. You are given: the current local time, the recent conversation, the user's saved items, and their
 new message. Return JSON only:
 
 {
@@ -133,13 +241,15 @@ def format_context(history: list, items: list) -> str:
     return f"Recent conversation:\n{convo}\n\nSaved items:\n{saved}"
 
 
-def respond(message: str, history: list, items: list, now_local: datetime) -> dict:
-    out = _generate(
+def respond(message: str, history: list, items: list, now_local: datetime, prefer=None) -> dict:
+    data = _ask(
         SYSTEM,
         f"Current local time: {now_local:%A, %Y-%m-%d %H:%M}\n\n"
         f"{format_context(history, items)}\n\nNew message from the user:\n{message}",
+        prefer=prefer,
     )
-    data = _json_from(out)
+    if not isinstance(data, dict):
+        raise ValueError("assistant did not return an object")
     data.setdefault("reply", "")
     data.setdefault("save", [])
     data.setdefault("done", [])

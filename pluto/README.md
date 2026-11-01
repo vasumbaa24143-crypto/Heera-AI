@@ -17,7 +17,7 @@ You need Python 3.11 or newer.
 
 1. In Telegram, message **@BotFather** → `/newbot` → copy the token.
 2. Message **@userinfobot** → copy your numeric user id.
-3. Get a Gemini API key (aistudio.google.com/apikey) and, for voice, a Sarvam key (dashboard.sarvam.ai).
+3. Get at least one AI key: Gemini (aistudio.google.com/apikey), Groq (console.groq.com/keys) or Z AI (z.ai). With more than one, Pluto falls back automatically when one is rate-limited or down. For voice, also get a Sarvam key (dashboard.sarvam.ai).
 4. Run:
 
 ```bash
@@ -36,7 +36,7 @@ python bot.py
 
 ```bash
 python simulate.py --offline   # no keys, no network: simple built-in assistant
-python simulate.py             # same, but with Gemini (needs GEMINI_API_KEY)
+python simulate.py             # same, but with your AI keys from .env
 ```
 
 It runs the same flow as the bot (`core.py`) with its own `simulate.db`. Buttons appear as
@@ -53,7 +53,7 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/forget` (clear chat history) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/forget` (clear chat history) · `/model` (choose which AI thinks first) · `/export` (JSON download of items and chat)
 
 ## How nudges work
 
@@ -78,4 +78,4 @@ The bot must be running to nudge.
 
 - Each message sends the last 100 chat messages and your open items (plus 50 recent closed ones) to the model. "What have we discussed" only reaches that far back in the chat; saved items are always included. Add search/embeddings when this gets slow or costly.
 - Check `stt.py` against Sarvam's current docs; the model name and field names are env-configurable.
-- The Gemini model defaults to `gemini-2.5-flash`; change `PLUTO_MODEL` if Google retires it.
+- AI providers are tried in order Gemini → Groq → Z AI (`PLUTO_PROVIDERS` changes it, and `/model` in chat picks which one goes first; the rest stay as backup). Default models: `gemini-2.5-flash`, `llama-3.3-70b-versatile` (Groq), `glm-4.6` (Z AI); change `PLUTO_MODEL`, `GROQ_MODEL`, `ZAI_MODEL` if a provider retires one. Fallback models may phrase replies differently, but the code-side checks (what gets saved, never citing unknown items) apply to all of them.

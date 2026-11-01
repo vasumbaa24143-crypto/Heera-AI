@@ -15,7 +15,8 @@ The code, not the model, decides what actually happens: actions are checked
 against the user's own items, saves are confirmed with real ids, and a reply
 that cites an item the user does not have is withheld.
 
-`llm` is any object with respond(message, history, items, now_local) -> dict.
+`llm` is any object with respond(message, history, items, now_local, prefer=None) -> dict,
+and choices() -> [(name, label)] for the /model menu.
 (llm.py talks to Gemini; offline.py and the tests provide stand-ins.)
 """
 import json
@@ -50,6 +51,7 @@ START_TEXT = (
     "• “what have we discussed about the YouTube idea?”\n\n"
     "/list  open items · /done <id> · /snooze <id> (+1 day)\n"
     "/delete <id>  remove forever · /forget  clear our chat history\n"
+    "/model  choose which AI thinks first\n"
     "/export  download everything"
 )
 
@@ -57,7 +59,8 @@ START_TEXT = (
 @dataclass
 class Reply:
     text: str
-    buttons: list = field(default_factory=list)  # [(label, callback_data), ...]
+    # [(label, callback_data), ...] shown as one row, or [[...], [...]] for several rows
+    buttons: list = field(default_factory=list)
 
 
 # ---------- formatting ----------
@@ -210,7 +213,8 @@ def chat(uid, text, llm, now=None) -> list:
 
     try:
         result = _normalize(
-            llm.respond(text, history_views(history), item_views(rows, now), to_local(now))
+            llm.respond(text, history_views(history), item_views(rows, now), to_local(now),
+                        prefer=db.get_setting(uid, "model"))
         )
     except Exception:
         # Never lose a thought: if the assistant fails, keep the message as a note.
@@ -304,6 +308,43 @@ def cmd_forget(uid) -> Reply:
     return Reply(f"Cleared our chat history ({n} messages). Your saved items are untouched.")
 
 
+def cmd_model(uid, llm, arg=None) -> Reply:
+    """/model: show the AI options as buttons, or pick one directly (/model groq)."""
+    options = llm.choices() if hasattr(llm, "choices") else []
+    if not options:
+        return Reply("There's no AI model to choose from right now (offline, or no AI keys set).")
+    if arg:
+        return choose_model(uid, llm, arg.strip().lower())
+    current = db.get_setting(uid, "model", "auto")
+    if current not in {n for n, _ in options}:
+        current = "auto"
+    names = " → ".join(lbl.split(" (")[0] for _, lbl in options)
+    buttons = [(("✓ " if current == "auto" else "") + f"⚡ Auto ({names})", "model:auto")]
+    buttons += [(("✓ " if current == n else "") + lbl, f"model:{n}") for n, lbl in options]
+    lines = [
+        "🧠 Which AI should think first? The others stay as backup if it's busy or down.",
+        "",
+        f"Now: {'Auto' if current == 'auto' else dict(options)[current]}",
+    ]
+    return Reply("\n".join(lines), [[b] for b in buttons])
+
+
+def choose_model(uid, llm, name) -> Reply:
+    options = dict(llm.choices() if hasattr(llm, "choices") else [])
+    if name == "auto":
+        db.set_setting(uid, "model", "auto")
+        order = " → ".join(lbl.split(" (")[0] for lbl in options.values())
+        return Reply(f"⚡ Auto: I'll use {order}, falling back in that order.")
+    if name not in options:
+        avail = ", ".join(["auto", *options]) or "none"
+        return Reply(f"I don't have “{name}” set up. Options: {avail}.")
+    db.set_setting(uid, "model", name)
+    others = [lbl.split(" (")[0] for n, lbl in options.items() if n != name]
+    verb = "stays" if len(others) == 1 else "stay"
+    backup = f" {' and '.join(others)} {verb} as backup." if others else ""
+    return Reply(f"🧠 Done — I'll think with {options[name]} first.{backup}")
+
+
 def export_json(uid) -> str:
     return json.dumps(
         {"items": db.export_all(uid), "messages": db.export_messages(uid)},
@@ -312,9 +353,11 @@ def export_json(uid) -> str:
     )
 
 
-def button(uid, data, now=None):
+def button(uid, data, now=None, llm=None):
     """Handle an inline-button press. Returns a Reply, or None for unknown data."""
     action, _, raw = (data or "").partition(":")
+    if action == "model":
+        return choose_model(uid, llm, raw) if llm is not None else None
     item_id = parse_id(raw)
     if item_id is None:
         return None

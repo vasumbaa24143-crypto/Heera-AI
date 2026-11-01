@@ -106,7 +106,11 @@ def _agenda(t: str, items: list):
     )
 
 
-def respond(message: str, history: list, items: list, now_local: datetime) -> dict:
+def choices() -> list:
+    return []  # the offline stand-in has no models to choose from
+
+
+def respond(message: str, history: list, items: list, now_local: datetime, prefer=None) -> dict:
     text = message.strip()
     t = text.lower()
     last_pluto = next((m["text"] for m in reversed(history) if m["role"] == "pluto"), "")

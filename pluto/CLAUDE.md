@@ -18,8 +18,8 @@ nudges until things are done. Read README.md for setup and behaviour.
    invent a deadline or a priority the user did not give or clearly imply. In code, a
    reply that cites an item id the user does not have is withheld (`core.chat`).
 3. **Ask before any outside action.** Pluto only ever messages its own user. It must not
-   contact other people, post, buy, or call outside services beyond labelling (Gemini)
-   and transcription (Sarvam) without the user saying yes first. The same goes for
+   contact other people, post, buy, or call outside services beyond the AI providers
+   (Gemini, Groq, Z AI) and transcription (Sarvam) without the user saying yes first. The same goes for
    anyone working on this repo: ask before pushing, deploying, creating repos, or
    sending anything to an external service.
 4. **Keys only in `.env`.** API keys and tokens live in `.env` (local) or the host's
@@ -39,7 +39,8 @@ nudges until things are done. Read README.md for setup and behaviour.
 Also built in: only `ALLOWED_USER_ID` may use the bot (fail closed if unset); the
 assistant can mark only the user's own open items done; `/delete` removes an item,
 its nudge history and the chat messages it came from, for good; `/forget` clears the
-chat history; `/export` returns items and conversation; no nudges 22:00–08:00 local;
+chat history; `/model` picks which AI provider goes first (saved per user, others
+stay as backup); `/export` returns items and conversation; no nudges 22:00–08:00 local;
 at most 5 nudges per user per 24 hours.
 
 ## Layout
@@ -49,7 +50,9 @@ at most 5 nudges per user per 24 hours.
   proposes (`reply`, `save`, `done`); core checks and applies.
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`.
-- `llm.py` — Gemini (`respond`), including the assistant's system prompt.
+- `llm.py` — the assistant (`respond`) and its system prompt. Tries Gemini → Groq →
+  Z AI until one returns valid JSON (`PLUTO_PROVIDERS` sets the order); if all fail,
+  core saves the raw note (rule 5).
   `offline.py` — rule-based stand-in for `simulate.py --offline`. Any object with
   `respond(message, history, items, now_local)` works as the assistant.
 - `stt.py` — Sarvam speech-to-text.

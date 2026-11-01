@@ -217,14 +217,24 @@ def test_nudge_job_respects_quiet_hours(monkeypatch):
 
 
 def test_config_check(monkeypatch):
-    for k in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID", "GEMINI_API_KEY"):
+    for k in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID", "GEMINI_API_KEY", "GROQ_API_KEY",
+              "ZAI_API_KEY", "Z_AI_API_KEY", "PLUTO_PROVIDERS"):
         monkeypatch.delenv(k, raising=False)
-    with pytest.raises(SystemExit, match="TELEGRAM_BOT_TOKEN, ALLOWED_USER_ID, GEMINI_API_KEY"):
+    with pytest.raises(SystemExit, match="TELEGRAM_BOT_TOKEN, ALLOWED_USER_ID, an AI key"):
         bot.check_config()
+
+
+def test_config_accepts_any_one_ai_key(monkeypatch):
+    for k in ("GEMINI_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "PLUTO_PROVIDERS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("ALLOWED_USER_ID", str(ME))
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    bot.check_config()  # does not exit
 
 
 def test_app_builds_with_all_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST-not-a-real-token")
     app = bot.build_app()
-    assert sum(len(h) for h in app.handlers.values()) == 10
+    assert sum(len(h) for h in app.handlers.values()) == 11
     assert app.job_queue is not None  # needs python-telegram-bot[job-queue]

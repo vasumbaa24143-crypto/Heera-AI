@@ -41,11 +41,19 @@ def allowed(update: Update) -> bool:
     return bool(u) and bool(ALLOWED) and str(u.id) == ALLOWED
 
 
+def button_rows(buttons) -> list:
+    """Reply.buttons is one row [(label, data), ...] or several rows [[...], [...]]."""
+    if not buttons:
+        return []
+    return buttons if isinstance(buttons[0], list) else [buttons]
+
+
 def markup(reply: core.Reply):
-    if not reply.buttons:
+    rows = button_rows(reply.buttons)
+    if not rows:
         return None
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(label, callback_data=data) for label, data in reply.buttons]]
+        [[InlineKeyboardButton(label, callback_data=data) for label, data in row] for row in rows]
     )
 
 
@@ -134,6 +142,12 @@ async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await send(update.message, [core.cmd_forget(update.effective_user.id)])
 
 
+async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(update.message, [core.cmd_model(update.effective_user.id, llm, _arg(ctx))])
+
+
 async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
@@ -146,7 +160,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await q.answer()  # always stop the button's loading spinner
     if not allowed(update):
         return
-    reply = core.button(update.effective_user.id, q.data)
+    reply = core.button(update.effective_user.id, q.data, llm=llm)
     if reply is None:
         return
     try:
@@ -174,15 +188,17 @@ async def nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def check_config() -> None:
-    missing = [
-        k for k in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID", "GEMINI_API_KEY") if not os.getenv(k)
-    ]
+    missing = [k for k in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID") if not os.getenv(k)]
+    if not llm.providers():
+        missing.append("an AI key (GEMINI_API_KEY, GROQ_API_KEY or ZAI_API_KEY)")
     if missing:
         raise SystemExit(
             f"Missing in .env: {', '.join(missing)}. Copy .env.example to .env and fill it in."
         )
     if not ALLOWED.isdigit():
         raise SystemExit("ALLOWED_USER_ID must be your numeric Telegram id (ask @userinfobot).")
+    if len(llm.providers()) == 1:
+        log.warning("Only one AI provider is set; add another key so Pluto has a fallback.")
     if not os.getenv("SARVAM_API_KEY"):
         log.warning("SARVAM_API_KEY is not set: voice notes will not work, text will.")
 
@@ -195,6 +211,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("snooze", cmd_snooze))
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("forget", cmd_forget))
+    app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
@@ -208,7 +225,7 @@ def main() -> None:
     check_config()
     db.init()
     app = build_app()
-    log.info("Pluto is running (model %s)", llm.MODEL)
+    log.info("Pluto is running (AI: %s)", llm.describe())
     app.run_polling()
 
 

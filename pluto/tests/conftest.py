@@ -24,14 +24,17 @@ class FakeLLM:
     """Stands in for llm.py. `result` may be a dict, a callable(message, history, items) -> dict,
     or an exception to raise. Records every call."""
 
-    def __init__(self, result=None):
+    def __init__(self, result=None, choices=(("gemini", "Gemini (g-1)"), ("groq", "Groq (q-1)"))):
         self._result = result if result is not None else {"reply": "🙂"}
+        self._choices = list(choices)
         self.calls = []
 
-    def respond(self, message, history, items, now_local):
-        self.calls.append(
-            {"message": message, "history": list(history), "items": list(items), "now": now_local}
-        )
+    def choices(self):
+        return self._choices
+
+    def respond(self, message, history, items, now_local, prefer=None):
+        self.calls.append({"message": message, "history": list(history), "items": list(items),
+                           "now": now_local, "prefer": prefer})
         r = self._result
         if isinstance(r, Exception):
             raise r

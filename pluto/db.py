@@ -79,6 +79,14 @@ def init() -> None:
             )"""
         )
         c.execute("CREATE INDEX IF NOT EXISTS messages_user ON messages(user_id, id)")
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS settings(
+                user_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (user_id, key)
+            )"""
+        )
         c.execute("CREATE INDEX IF NOT EXISTS items_user ON items(user_id, status)")
         c.execute("CREATE INDEX IF NOT EXISTS nudges_user ON nudges(user_id, sent_at)")
         # Older prototype builds soft-deleted rows; /delete promises "remove forever".
@@ -135,6 +143,25 @@ def context_items(user_id, open_limit=300, closed_limit=50):
             (user_id, closed_limit),
         ).fetchall()
     return sorted(opened + closed, key=lambda r: r["id"])
+
+
+# ---------- settings ----------
+
+def get_setting(user_id, key, default=None):
+    with conn() as c:
+        row = c.execute(
+            "SELECT value FROM settings WHERE user_id=? AND key=?", (user_id, key)
+        ).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(user_id, key, value) -> None:
+    with conn() as c:
+        c.execute(
+            "INSERT INTO settings(user_id, key, value) VALUES (?,?,?)"
+            " ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value",
+            (user_id, key, value),
+        )
 
 
 # ---------- conversation log ----------
