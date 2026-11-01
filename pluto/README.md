@@ -64,7 +64,9 @@ python export_training.py             # writes training/conversations.jsonl
 
 It reads the database read-only, so anything you removed with `/delete` or `/forget` is
 not exported, and each run rewrites the file. The file is plain text on your machine
-(git-ignored; API keys and bot tokens are redacted, everything else is as you wrote it).
+(git-ignored) and holds your messages as you wrote them. Only keys in a few known formats
+(Google, Groq, NVIDIA, `sk-…` and Telegram bot tokens) are replaced with `[REDACTED_KEY]`;
+a key in any other format is not detected, so treat the file as private.
 This does not train the hosted models (Gemini, Groq, Z AI, NVIDIA); it is the data for a
 separate fine-tuning or evaluation step.
 

@@ -7,8 +7,10 @@
 It reads the `messages` table read-only, so it holds exactly what Pluto still remembers:
 anything removed with /delete or /forget is gone and is not exported. Each run rewrites the
 file, so export again after deleting. The file stays on this machine (`training/` and
-*.jsonl are git-ignored). Your messages go in as written, apart from API keys and bot
-tokens, which are replaced with [REDACTED_KEY]. Nothing is sent anywhere.
+*.jsonl are git-ignored). Your messages go in as written, except keys in a few known
+formats (Google, Groq, NVIDIA, sk-..., Telegram bot tokens), which become [REDACTED_KEY];
+a key in any other format is not detected, so treat the file as private. Nothing is sent
+anywhere.
 """
 import argparse
 import json
@@ -21,6 +23,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROLES = {"user": "user", "pluto": "assistant"}
+# Recognised key formats only: Google, Groq, NVIDIA, sk-..., Telegram bot tokens.
+# A key in any other format is exported as written.
 SECRET = re.compile(
     r"AIza[0-9A-Za-z_-]{20,}|gsk_[0-9A-Za-z]{20,}|nvapi-[0-9A-Za-z_-]{20,}"
     r"|sk-[0-9A-Za-z_-]{20,}|\d{8,10}:[0-9A-Za-z_-]{30,}"
