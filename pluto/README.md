@@ -52,6 +52,22 @@ pytest
 
 The tests use a fake assistant and fake Telegram objects, so they need no keys or network.
 
+## Training data
+
+Every message you send and every reply is already kept in `pluto.db`. To turn it into
+chat-style JSONL (for evaluating prompts or fine-tuning a model of your own):
+
+```bash
+python export_training.py --dry-run   # just the counts
+python export_training.py             # writes training/conversations.jsonl
+```
+
+It reads the database read-only, so anything you removed with `/delete` or `/forget` is
+not exported, and each run rewrites the file. The file is plain text on your machine
+(git-ignored; API keys and bot tokens are redacted, everything else is as you wrote it).
+This does not train the hosted models (Gemini, Groq, Z AI, NVIDIA); it is the data for a
+separate fine-tuning or evaluation step.
+
 ## Commands
 
 `/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/forget` (clear chat history) · `/model` (choose which AI thinks first) · `/export` (JSON download of items and chat)

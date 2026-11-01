@@ -59,6 +59,9 @@ capped at 5 per user per 24 hours.
   `offline.py` — rule-based stand-in for `simulate.py --offline`. Any object with
   `respond(message, history, items, now_local)` works as the assistant.
 - `stt.py` — voice-to-text: Groq Whisper → Gemini → Sarvam, whichever keys exist.
+- `export_training.py` — exports the stored chat as JSONL, reading `messages` read-only, so
+  `/delete` and `/forget` stay "for good". Do not add a second copy of conversations that
+  outlives them.
 - `tests/` — pytest with a fake assistant and fake Telegram objects; no network needed.
 
 ## Working on it
