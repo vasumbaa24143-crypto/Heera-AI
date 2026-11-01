@@ -265,13 +265,17 @@ def nudges_last_24h(user_id, now=None) -> int:
         ).fetchone()[0]
 
 
-def pick_nudges(now=None):
+def pick_nudges(now=None, quiet=False):
     """Return (item_row, reason) pairs that should be nudged now.
 
-    reason is 'due' or 'stale'. Overdue items go before stale ideas; within
-    each, items nudged the fewest times go first (so the daily cap never starves
-    an item), then the oldest. The daily cap is applied per user.
-    Quiet hours are the caller's job (see core.due_nudges)."""
+    reason is:
+      'reminder' - the first alert for something due: the user asked for this time,
+                   so it always goes out, ignoring the daily cap and quiet hours;
+      'due'      - a repeat nudge for an item still open after its due time;
+      'stale'    - an idea left untouched for a while.
+    Repeats and stale ideas respect the daily cap (per user) and are held back
+    while `quiet` (quiet hours) is true. Overdue items go before stale ideas;
+    within each, items nudged the fewest times go first, then the oldest."""
     now = now or now_utc()
     now_s = to_str(now)
     with conn() as c:
@@ -281,13 +285,16 @@ def pick_nudges(now=None):
             (now_s,),
         ).fetchall()
 
-    candidates = []
+    reminders, candidates = [], []
     for r in rows:
         last = from_str(r["last_nudged_at"]) if r["last_nudged_at"] else None
         if r["due_at"]:
-            if (
-                r["due_at"] <= now_s
-                and r["nudge_count"] < DUE_MAX_NUDGES
+            if r["due_at"] > now_s:
+                continue
+            if r["nudge_count"] == 0:
+                reminders.append((r, "reminder"))
+            elif (
+                r["nudge_count"] < DUE_MAX_NUDGES
                 and (last is None or now - last >= timedelta(hours=DUE_GAP_HOURS))
             ):
                 candidates.append((0, r["nudge_count"], r["due_at"], r["id"], r, "due"))
@@ -299,9 +306,14 @@ def pick_nudges(now=None):
                 and (last is None or now - last >= timedelta(days=IDEA_GAP_DAYS))
             ):
                 candidates.append((1, r["nudge_count"], r["created_at"], r["id"], r, "stale"))
+    reminders.sort(key=lambda t: (t[0]["due_at"], t[0]["id"]))
+    if quiet:
+        return reminders
     candidates.sort(key=lambda t: t[:4])
 
-    picked, per_user = [], {}
+    picked, per_user = list(reminders), {}
+    for r, _ in reminders:
+        per_user[r["user_id"]] = per_user.get(r["user_id"], nudges_last_24h(r["user_id"], now)) + 1
     for *_, r, reason in candidates:
         uid = r["user_id"]
         if uid not in per_user:

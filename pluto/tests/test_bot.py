@@ -181,13 +181,22 @@ def test_voice_note_is_transcribed_then_saved(monkeypatch):
 
 def test_voice_transcription_failure(monkeypatch):
     async def broken(*a, **k):
-        raise RuntimeError("Sarvam down")
+        raise bot.stt.TranscriptionFailed("groq: HTTPStatusError 500")
 
     monkeypatch.setattr(bot.stt, "transcribe", broken)
+    monkeypatch.setattr(bot.stt, "providers", lambda: ["groq"])
     u = update(voice=FakeVoice())
     go(bot.on_voice(u, ctx()))
-    assert "could not understand" in u.message.replies[0][0]
+    assert "couldn't make out that voice note" in u.message.replies[0][0]
     assert db.recall_pool(ME) == []
+
+
+def test_voice_without_any_key_says_what_to_add(monkeypatch):
+    for k in ("GROQ_API_KEY", "GEMINI_API_KEY", "SARVAM_API_KEY", "STT_PROVIDERS"):
+        monkeypatch.delenv(k, raising=False)
+    u = update(voice=FakeVoice())
+    go(bot.on_voice(u, ctx()))
+    assert "GROQ_API_KEY, GEMINI_API_KEY or SARVAM_API_KEY" in u.message.replies[0][0]
 
 
 def test_nudge_job_sends_and_marks():
@@ -206,14 +215,23 @@ def test_nudge_job_failed_send_is_retried_later():
     assert db.get_item(ME, i)["nudge_count"] == 0
 
 
-def test_nudge_job_respects_quiet_hours(monkeypatch):
+def test_nudge_job_sends_a_reminder_at_night_but_holds_repeats(monkeypatch):
     from datetime import timedelta
-    db.add_item(ME, "task", "x", "x", db.to_str(NOW), now=NOW)
     night = NOW + timedelta(hours=11)  # 23:00 in India
+    i = db.add_item(ME, "task", "x", "x", db.to_str(night), now=NOW)
     monkeypatch.setattr(db, "now_utc", lambda: night)
     c = ctx()
     go(bot.nudge_job(c))
-    assert c.bot.sent == []
+    assert [t for _, t, _ in c.bot.sent] == [f"⏰ Reminder: x (#{i})"]
+    later = night + timedelta(hours=7)  # 06:00, still quiet; a repeat would be due
+    monkeypatch.setattr(db, "now_utc", lambda: later)
+    c2 = ctx()
+    go(bot.nudge_job(c2))
+    assert c2.bot.sent == []
+
+
+def test_nudge_job_runs_every_minute():
+    assert bot.NUDGE_EVERY_SECONDS == 60
 
 
 def test_config_check(monkeypatch):

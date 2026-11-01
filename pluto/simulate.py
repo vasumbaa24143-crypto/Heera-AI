@@ -75,13 +75,13 @@ class Session:
             reply = core.button(self.uid, arg, now, llm=self.llm)
             return render([reply]) if reply else ["Unknown button."]
         if cmd == "/nudges":
-            if core.in_quiet_hours(now):
-                return ["(quiet hours — no nudges between 22:00 and 08:00)"]
             out = []
             for uid, item_id, reply in core.due_nudges(now):
                 db.mark_nudged(item_id, uid, now)
                 if uid == self.uid:
                     out += render([reply])
+            if not out and core.in_quiet_hours(now):
+                return ["(quiet hours: only reminders you set go out between 22:00 and 08:00)"]
             return out or ["(nothing to nudge right now)"]
         if cmd == "/advance":
             m = re.fullmatch(r"(\d+)\s*([hd])", arg or "")

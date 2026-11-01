@@ -33,7 +33,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO lines include t
 log = logging.getLogger("pluto")
 
 ALLOWED = os.getenv("ALLOWED_USER_ID", "").strip()  # only this Telegram user may use the bot
-NUDGE_EVERY_SECONDS = 1800
+NUDGE_EVERY_SECONDS = 60  # reminders arrive within a minute of their time
 
 
 def allowed(update: Update) -> bool:
@@ -96,11 +96,18 @@ async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             filename=getattr(v, "file_name", None) or "voice.ogg",
             mime=getattr(v, "mime_type", None) or "audio/ogg",
         )
+    except stt.TranscriptionFailed as e:
+        log.warning("transcription failed: %s", e)
+        if not stt.providers():
+            msg = (f"I can't listen to voice notes yet: add one of {stt.KEY_NAMES} to .env "
+                   "and restart me. Meanwhile, please type it.")
+        else:
+            msg = "I couldn't make out that voice note just now. Please try again or type it."
+        await update.message.reply_text(msg)
+        return
     except Exception:
-        log.exception("transcription failed")
-        await update.message.reply_text(
-            "I could not understand that voice note. Please type it or try again."
-        )
+        log.exception("could not download the voice note")
+        await update.message.reply_text("I couldn't download that voice note. Please try again.")
         return
     if not text:
         await update.message.reply_text("I heard silence. Try again?")
@@ -200,8 +207,8 @@ def check_config() -> None:
         raise SystemExit("ALLOWED_USER_ID must be your numeric Telegram id (ask @userinfobot).")
     if len(llm.providers()) == 1:
         log.warning("Only one AI provider is set; add another key so Pluto has a fallback.")
-    if not os.getenv("SARVAM_API_KEY"):
-        log.warning("SARVAM_API_KEY is not set: voice notes will not work, text will.")
+    if not stt.providers():
+        log.warning("No speech-to-text key (%s): voice notes won't work, text will.", stt.KEY_NAMES)
 
 
 def build_app() -> Application:
@@ -218,7 +225,7 @@ def build_app() -> Application:
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
-    app.job_queue.run_repeating(nudge_job, interval=NUDGE_EVERY_SECONDS, first=60)
+    app.job_queue.run_repeating(nudge_job, interval=NUDGE_EVERY_SECONDS, first=5)
     return app
 
 
@@ -229,7 +236,7 @@ KEY_REPORT = [
     ("GROQ_API_KEY", "Groq", "AI"),
     ("ZAI_API_KEY", "Z AI", "AI"),
     ("NVIDIA_API_KEY", "NVIDIA Nemotron", "AI"),
-    ("SARVAM_API_KEY", "Sarvam (voice notes)", "optional"),
+    ("SARVAM_API_KEY", "Sarvam (voice backup)", "optional"),
 ]
 
 
@@ -240,8 +247,9 @@ def key_report() -> str:
         val = os.getenv(name) or (os.getenv("Z_AI_API_KEY") if name == "ZAI_API_KEY" else None)
         mark = "✓ set    " if val else ("✗ MISSING" if kind == "required" else "– not set")
         lines.append(f"  {mark}  {name:<20} {what}" + ("  (required)" if kind == "required" else ""))
-    order = llm.describe()
-    lines.append(f"AI order: {order}")
+    lines.append(f"AI order: {llm.describe()}")
+    voice = " → ".join(stt.providers()) or f"✗ none (add {stt.KEY_NAMES})"
+    lines.append(f"Voice notes: {voice}")
     if not llm.providers():
         lines.append("✗ Set at least one AI key.")
     return "\n".join(lines)

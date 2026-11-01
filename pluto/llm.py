@@ -228,7 +228,8 @@ WHEN TO SAVE
   uses_previous_message true, and build the title from the earlier message. If they say there is
   no particular time, save it with due_local null. A plain to-do doesn't need a time.
 - due_local: resolve "kal", "tomorrow", "parso", "next Monday", "this weekend" (Saturday 10:00),
-  "shaam" (18:00), "subah" (09:00) from the current local time. Never invent a time they didn't
+  "shaam" (18:00), "subah" (09:00), and relative times like "in 10 minutes", "10 min baad",
+  "2 ghante mein", "in an hour" from the current local time (add to it exactly). Never invent a time they didn't
   give or clearly imply.
 - Do not say "saved" or quote item ids for new items in your reply: the app appends a confirmation
   with the real id. Just acknowledge naturally and briefly (e.g. "Pakka 👍" /
