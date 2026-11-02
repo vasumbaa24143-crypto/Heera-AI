@@ -210,6 +210,32 @@ def test_nudge_job_sends_and_marks():
     assert db.get_item(ME, i)["nudge_count"] == 1
 
 
+def test_a_sent_nudge_is_kept_in_the_chat_for_the_next_reply(monkeypatch):
+    i = db.add_item(ME, "task", "Barber", "remind me barber 6.30", db.to_str(NOW), now=NOW)
+    go(bot.nudge_job(ctx()))
+    llm = use_llm(monkeypatch, FakeLLM(says(f"Done #{i}", done=[i])))
+    go(bot.on_text(update(text="Done already"), ctx()))
+    assert llm.calls[0]["history"][-1]["text"] == f"⏰ Reminder: Barber (#{i})"
+    assert db.get_item(ME, i)["status"] == "done"
+
+
+def test_replying_to_a_message_shows_it_to_the_assistant(monkeypatch):
+    i = db.add_item(ME, "task", "Barber", "remind me barber 6.30", now=NOW)
+    llm = use_llm(monkeypatch, FakeLLM(says(f"Done #{i}", done=[i])))
+    u = update(text="Done already")
+    u.message.reply_to_message = SimpleNamespace(text=f"⏰ Reminder: Barber (#{i})", caption=None)
+    go(bot.on_text(u, ctx()))
+    assert llm.calls[0]["message"] == f"[Replying to: ⏰ Reminder: Barber (#{i})]\nDone already"
+    assert db.recent_messages(ME)[0]["text"] == "Done already"  # stored as the user wrote it
+    assert db.get_item(ME, i)["status"] == "done"
+
+
+def test_a_plain_message_is_sent_as_is(monkeypatch):
+    llm = use_llm(monkeypatch, FakeLLM(says("hi")))
+    go(bot.on_text(update(text="hello"), ctx()))
+    assert llm.calls[0]["message"] == "hello"
+
+
 def test_nudge_job_failed_send_is_retried_later():
     i = db.add_item(ME, "task", "Call mom", "call mom", db.to_str(NOW), now=NOW)
     go(bot.nudge_job(ctx(fake_bot=FakeBot(fail=True))))

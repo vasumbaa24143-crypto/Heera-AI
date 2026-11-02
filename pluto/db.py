@@ -552,6 +552,11 @@ def delete_item(user_id, item_id) -> bool:
                 "DELETE FROM messages WHERE user_id=? AND role='user' AND text=?",
                 (user_id, line),
             ).rowcount
+        # Nudges kept in the chat name their item as "(#id)".
+        removed += c.execute(
+            "DELETE FROM messages WHERE user_id=? AND role='pluto' AND instr(text, ?) > 0",
+            (user_id, f"(#{item_id})"),
+        ).rowcount
         if removed:
             # A summary may still mention those words: drop it; it's rebuilt from what's left.
             c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))

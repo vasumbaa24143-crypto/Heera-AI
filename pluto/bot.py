@@ -73,9 +73,19 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(core.START_TEXT)
 
 
+def quoted_text(message):
+    """The text of the message the user replied to (Telegram's "Reply"), if any."""
+    quoted = getattr(message, "reply_to_message", None)
+    if quoted is None:
+        return None
+    return quoted.text or getattr(quoted, "caption", None) or None
+
+
 async def handle_text(update: Update, text: str) -> None:
     uid = update.effective_user.id
-    replies = await asyncio.to_thread(core.chat, uid, text, llm)
+    replies = await asyncio.to_thread(
+        core.chat, uid, text, llm, replying_to=quoted_text(update.message)
+    )
     await send(update.message, replies)
 
 
@@ -206,7 +216,7 @@ async def nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             log.exception("nudge failed for item %s", item_id)
             continue
-        db.mark_nudged(item_id, uid, now)
+        core.record_nudge(uid, item_id, reply, now)
 
 
 def digest_users() -> list:
