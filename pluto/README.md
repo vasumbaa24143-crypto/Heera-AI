@@ -54,7 +54,7 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/forget` (clear chat history) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/forget` (clear chat history and its summary) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
 
 ## Morning digest
 
@@ -106,5 +106,6 @@ The bot must be running to nudge.
 ## Known limits
 
 - **Search:** each message sends the AI your open items (the 150 most urgent), the 20 most recently finished, and the last 30 chat messages. On top of that, it sends up to 10 older items and 10 older messages that contain the same words, found with SQLite's built-in full-text search (FTS5). So "what did we discuss about Goa?" reaches back to your very first message, while each message stays small. Search matches **words, not meaning**: "beach holiday" won't find "Goa trip", and Hindi in Devanagari won't match the same word typed in Latin letters. If your Python's SQLite lacks FTS5, Pluto falls back to a slower plain-text search.
+- **Rolling summary:** once 20 or more messages have scrolled out of the last 30, Pluto asks the AI (in the background, checked every minute) to fold them into a short summary of older chats: plans, people, decisions, preferences, at most 15 lines. Every reply gets that summary as background. `/summary` shows it, `/forget` clears it, and `/delete` throws it away so it's rebuilt without the deleted words. If the AI fails, the old summary stays and it tries again 10 minutes later. Your saved items and messages are never changed by this.
 - Voice notes: Groq `whisper-large-v3` → Gemini → Sarvam `saarika:v2.5` (`STT_PROVIDERS` changes the order).
 - AI providers are tried in order Gemini → Groq → Z AI → NVIDIA Nemotron (`PLUTO_PROVIDERS` changes it, and `/model` in chat picks which one goes first; the rest stay as backup). Default models: `gemini-2.5-flash`, `llama-3.3-70b-versatile` (Groq), `glm-4.6` (Z AI), `nvidia/nemotron-3.5-super-vl-120b-a12b` (NVIDIA, with thinking off for quick replies; `NVIDIA_THINKING=1` turns it on); change `PLUTO_MODEL`, `GROQ_MODEL`, `ZAI_MODEL`, `NVIDIA_MODEL` if a provider retires one. Fallback models may phrase replies differently, but the code-side checks (what gets saved, never citing unknown items) apply to all of them.

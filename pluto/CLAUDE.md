@@ -49,7 +49,12 @@ built from data with no AI call. It's sent at most once per local day, from the 
 digest time until 4 h later, and skipped when there's nothing overdue, nothing due today
 and no idea to revisit. With the digest on, stale ideas appear only there, not as
 separate nudges. Digest items are marked shown with `db.touch_nudged`, which doesn't
-use the daily cap.
+use the daily cap. Rolling summary (`core.update_summary`, `bot.summary_job`, `/summary`):
+messages older than the last `HISTORY_TURNS` (30) are folded, at least 20 at a time and at most 100, into one
+derived summary per user (`summaries` table, ≤15 lines / 1,500 chars). It's sent to the AI as
+background with every message. It never replaces `messages.text`; `/forget` deletes it;
+deleting an item whose words came from chat deletes it so it's rebuilt without them;
+on failure the old one stays and retries wait 10 min.
 
 ## Layout
 

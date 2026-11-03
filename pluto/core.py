@@ -16,7 +16,8 @@ against the user's own items, saves are confirmed with real ids, and a reply
 that cites an item the user does not have is withheld.
 
 `llm` is any object with
-respond(message, history, items, now_local, prefer=None, related=()) -> dict,
+respond(message, history, items, now_local, prefer=None, related=(), summary="") -> dict,
+and (for rolling summaries) summarise(previous, messages, now_local, prefer=None) -> list,
 and choices() -> [(name, label)] for the /model menu.
 (llm.py talks to Gemini; offline.py and the tests provide stand-ins.)
 """
@@ -41,6 +42,11 @@ TITLE_MAX = 120
 MAX_REPLY = 4000  # Telegram's limit is 4096 characters
 HISTORY_TURNS = 30   # most recent messages the assistant sees, word for word
 SEARCH_HITS = 10     # older items, and older messages, found by search for each message
+SUMMARY_BATCH_MIN = 20     # summarise once this many messages have left the recent window
+SUMMARY_BATCH_MAX = 100    # at most this many per summarising call
+SUMMARY_MAX_LINES = 15
+SUMMARY_MAX_CHARS = 1500
+SUMMARY_RETRY = timedelta(minutes=10)  # after a failed summary, wait before trying again
 
 START_TEXT = (
     "Hi, I'm Pluto 👋 Talk to me like you would to an assistant.\n\n"
@@ -54,6 +60,7 @@ START_TEXT = (
     "/list  open items · /done <id> · /snooze <id> (+1 day)\n"
     "/delete <id>  remove forever · /forget  clear our chat history\n"
     "/model  choose which AI thinks first\n"
+    "/summary  what I remember from older chats\n"
     "/digest  morning digest (on at 08:30; /digest now to preview)\n"
     "/export  download everything"
 )
@@ -223,7 +230,8 @@ def chat(uid, text, llm, now=None) -> list:
     try:
         result = _normalize(
             llm.respond(text, history_views(history), item_views(rows, now), to_local(now),
-                        prefer=db.get_setting(uid, "model"), related=history_views(related))
+                        prefer=db.get_setting(uid, "model"), related=history_views(related),
+                        summary=current_summary(uid))
         )
     except Exception:
         # Never lose a thought: if the assistant fails, keep the message as a note.
@@ -356,7 +364,8 @@ def choose_model(uid, llm, name) -> Reply:
 
 def export_json(uid) -> str:
     return json.dumps(
-        {"items": db.export_all(uid), "messages": db.export_messages(uid)},
+        {"items": db.export_all(uid), "messages": db.export_messages(uid),
+         "summaries": db.export_summaries(uid)},
         ensure_ascii=False,
         indent=2,
     )
@@ -559,3 +568,67 @@ def cmd_digest(uid, arg=None, now=None) -> Reply:
     return Reply(f"☀️ Morning digest is {state}. It lists what's overdue, what's due today and "
                  "one old idea, and is skipped when there's nothing to say.\n"
                  "/digest now to preview · /digest 07:45 to change the time · /digest off")
+
+
+
+# ---------- rolling summary of older conversation ----------
+
+def current_summary(uid) -> str:
+    row = db.latest_summary(uid)
+    return row["text"] if row else ""
+
+
+def _clean_summary(lines) -> str:
+    """Tidy the model's lines; raise ValueError if they're unusable (fail closed)."""
+    if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+        raise ValueError("summary lines must be strings")
+    out = []
+    for ln in lines:
+        ln = " ".join(ln.split())
+        if not ln or ln.lower().strip("-• ()") in ("nothing", "none"):
+            continue
+        out.append(ln if ln.startswith(("-", "•")) else f"- {ln}")
+    text = "\n".join(out[:SUMMARY_MAX_LINES])
+    if len(text) > SUMMARY_MAX_CHARS:  # cut at a line boundary
+        text = text[:SUMMARY_MAX_CHARS].rsplit("\n", 1)[0]
+    return text
+
+
+def update_summary(uid, llm, now=None, force=False) -> bool:
+    """Fold messages that have left the recent window into the rolling summary.
+
+    Runs when at least SUMMARY_BATCH_MIN such messages are waiting (any number with
+    force=True). On any failure nothing changes (the previous summary stays) and it waits
+    SUMMARY_RETRY before trying again. Returns True if a new summary was stored."""
+    now = now or db.now_utc()
+    if not hasattr(llm, "summarise"):
+        return False
+    retry_after = db.get_setting(uid, "summary_retry_after")
+    if retry_after and not force and db.to_str(now) < retry_after:
+        return False
+    rows, waiting = db.unsummarised_messages(uid, HISTORY_TURNS, SUMMARY_BATCH_MAX)
+    if not rows or (waiting < SUMMARY_BATCH_MIN and not force):
+        return False
+    prev = db.latest_summary(uid)
+    try:
+        lines = llm.summarise(prev["text"] if prev else "", history_views(rows), to_local(now),
+                              prefer=db.get_setting(uid, "model"))
+        text = _clean_summary(lines)
+    except Exception:
+        log.exception("summary failed; keeping the previous one")
+        db.set_setting(uid, "summary_retry_after", db.to_str(now + SUMMARY_RETRY))
+        return False
+    start = prev["from_msg_id"] if prev else rows[0]["id"]
+    db.add_summary(uid, start, rows[-1]["id"], text, now=now)
+    return True
+
+
+def cmd_summary(uid) -> Reply:
+    """/summary: what Pluto remembers about older chats (besides saved items)."""
+    text = current_summary(uid)
+    if not text:
+        return Reply("No summary yet. Once our chat grows past the last 30 messages, I keep a "
+                     "short summary of the older part here. Your saved items are kept separately "
+                     "(/list).")
+    return Reply("🧠 What I remember from our older chats:\n" + text +
+                 "\n\n/forget clears this and the chat history; saved items stay.")

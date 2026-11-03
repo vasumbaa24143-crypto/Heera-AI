@@ -81,6 +81,17 @@ def init() -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS messages_user ON messages(user_id, id)")
         c.execute(
+            """CREATE TABLE IF NOT EXISTS summaries(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                from_msg_id INTEGER NOT NULL,  -- first message this summary covers
+                to_msg_id INTEGER NOT NULL,    -- last message it covers
+                text TEXT NOT NULL,            -- derived; may be "" when nothing was worth keeping
+                created_at TEXT NOT NULL
+            )"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS summaries_user ON summaries(user_id, id)")
+        c.execute(
             """CREATE TABLE IF NOT EXISTS settings(
                 user_id INTEGER NOT NULL,
                 key TEXT NOT NULL,
@@ -327,9 +338,77 @@ def recent_messages(user_id, limit=100):
 
 
 def forget_messages(user_id) -> int:
-    """Clear the conversation log (saved items are kept)."""
+    """Clear the conversation log and its summaries (saved items are kept)."""
     with conn() as c:
+        c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))
         return c.execute("DELETE FROM messages WHERE user_id=?", (user_id,)).rowcount
+
+
+# ---------- rolling summaries ----------
+#
+# Messages that have scrolled out of the recent window (the last `window` messages) are
+# folded into one rolling summary per user. Each new summary merges the previous one with
+# the next batch, and covers everything from the first message up to `to_msg_id`. Only the
+# latest row is used; older rows are kept small and pruned.
+
+def latest_summary(user_id):
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM summaries WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,)
+        ).fetchone()
+
+
+def add_summary(user_id, from_msg_id, to_msg_id, text, now=None) -> int:
+    with conn() as c:
+        cur = c.execute(
+            "INSERT INTO summaries(user_id, from_msg_id, to_msg_id, text, created_at)"
+            " VALUES (?,?,?,?,?)",
+            (user_id, from_msg_id, to_msg_id, text, to_str(now or now_utc())),
+        )
+        # keep the last few for /export and debugging; only the newest is used
+        c.execute(
+            "DELETE FROM summaries WHERE user_id=? AND id NOT IN"
+            " (SELECT id FROM summaries WHERE user_id=? ORDER BY id DESC LIMIT 5)",
+            (user_id, user_id),
+        )
+        return cur.lastrowid
+
+
+def delete_summaries(user_id) -> None:
+    with conn() as c:
+        c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))
+
+
+def unsummarised_messages(user_id, window, limit):
+    """Messages older than the last `window` messages that no summary covers yet, oldest
+    first (at most `limit`), and how many there are in total."""
+    with conn() as c:
+        start = c.execute(
+            "SELECT id FROM messages WHERE user_id=? ORDER BY id DESC LIMIT 1 OFFSET ?",
+            (user_id, window - 1),
+        ).fetchone()
+        if start is None:
+            return [], 0  # everything is still in the recent window
+        last = c.execute(
+            "SELECT to_msg_id FROM summaries WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        after = last["to_msg_id"] if last else 0
+        where = "user_id=? AND id>? AND id<?"
+        args = (user_id, after, start["id"])
+        total = c.execute(f"SELECT COUNT(*) FROM messages WHERE {where}", args).fetchone()[0]
+        rows = c.execute(
+            f"SELECT * FROM messages WHERE {where} ORDER BY id LIMIT ?", (*args, limit)
+        ).fetchall()
+    return rows, total
+
+
+def export_summaries(user_id):
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM summaries WHERE user_id=? ORDER BY id", (user_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def export_messages(user_id):
@@ -361,11 +440,15 @@ def delete_item(user_id, item_id) -> bool:
             return False
         c.execute("DELETE FROM items WHERE id=? AND user_id=?", (item_id, user_id))
         c.execute("DELETE FROM nudges WHERE item_id=? AND user_id=?", (item_id, user_id))
+        removed = 0
         for line in row["original_text"].split("\n"):
-            c.execute(
+            removed += c.execute(
                 "DELETE FROM messages WHERE user_id=? AND role='user' AND text=?",
                 (user_id, line),
-            )
+            ).rowcount
+        if removed:
+            # A summary may still mention those words: drop it; it's rebuilt from what's left.
+            c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))
         return True
 
 

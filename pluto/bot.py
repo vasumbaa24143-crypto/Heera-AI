@@ -162,6 +162,12 @@ async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await send(update.message, [core.cmd_digest(update.effective_user.id, _arg(ctx))])
 
 
+async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(update.message, [core.cmd_summary(update.effective_user.id)])
+
+
 async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
@@ -218,6 +224,16 @@ async def digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         core.digest_done(uid, to_mark, now)
 
 
+async def summary_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fold chat that has left the recent window into the rolling summary (in a worker
+    thread, since it may call the AI). Usually a quick no-op."""
+    for uid in digest_users():
+        try:
+            await asyncio.to_thread(core.update_summary, uid, llm)
+        except Exception:
+            log.exception("summary job failed for user %s", uid)
+
+
 def check_config() -> None:
     missing = [k for k in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID") if not os.getenv(k)]
     if not llm.providers():
@@ -244,6 +260,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("forget", cmd_forget))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("digest", cmd_digest))
+    app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
@@ -251,6 +268,7 @@ def build_app() -> Application:
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(nudge_job, interval=NUDGE_EVERY_SECONDS, first=5)
     app.job_queue.run_repeating(digest_job, interval=NUDGE_EVERY_SECONDS, first=10)
+    app.job_queue.run_repeating(summary_job, interval=NUDGE_EVERY_SECONDS, first=30)
     return app
 
 
