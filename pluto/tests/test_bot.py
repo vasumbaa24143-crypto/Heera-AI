@@ -254,7 +254,7 @@ def test_config_accepts_any_one_ai_key(monkeypatch):
 def test_app_builds_with_all_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST-not-a-real-token")
     app = bot.build_app()
-    assert sum(len(h) for h in app.handlers.values()) == 12
+    assert sum(len(h) for h in app.handlers.values()) == 14
     assert app.job_queue is not None  # needs python-telegram-bot[job-queue]
 
 
@@ -271,11 +271,11 @@ def test_key_check_lists_every_key_and_never_shows_values(monkeypatch):
         monkeypatch.delenv(n, raising=False)
     monkeypatch.delenv("Z_AI_API_KEY", raising=False)
     monkeypatch.delenv("PLUTO_PROVIDERS", raising=False)
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:SECRET-TG")
-    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-SECRET")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:VALUE-SHOULD-NOT-SHOW-TG")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-VALUE-SHOULD-NOT-SHOW")
     out = bot.key_report()
     for n, _, _ in bot.KEY_REPORT:
         assert n in out
-    assert "SECRET" not in out
+    assert "VALUE-SHOULD-NOT-SHOW" not in out
     assert "✓ set      NVIDIA_API_KEY" in out and "✗ MISSING  ALLOWED_USER_ID" in out
     assert "AI order: NVIDIA Nemotron" in out

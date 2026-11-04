@@ -19,7 +19,8 @@ nudges until things are done. Read README.md for setup and behaviour.
    reply that cites an item id the user does not have is withheld (`core.chat`).
 3. **Ask before any outside action.** Pluto only ever messages its own user. It must not
    contact other people, post, buy, or call outside services beyond the AI providers
-   (Gemini, Groq, Z AI, NVIDIA) and transcription (Sarvam) without the user saying yes first. The same goes for
+   (Gemini, Groq, Z AI, NVIDIA), transcription (Sarvam) and the Google Sheet dashboard the
+   user set up themselves (Google Sheets API) without the user saying yes first. The same goes for
    anyone working on this repo: ask before pushing, deploying, creating repos, or
    sending anything to an external service.
 4. **Keys only in `.env`.** API keys and tokens live in `.env` (local) or the host's
@@ -49,7 +50,12 @@ built from data with no AI call. It's sent at most once per local day, from the 
 digest time until 4 h later, and skipped when there's nothing overdue, nothing due today
 and no idea to revisit. With the digest on, stale ideas appear only there, not as
 separate nudges. Digest items are marked shown with `db.touch_nudged`, which doesn't
-use the daily cap.
+use the daily cap. Rolling summary (`core.update_summary`, `bot.summary_job`, `/summary`):
+messages older than the last `HISTORY_TURNS` (30) are folded, at least 20 at a time and at most 100, into one
+derived summary per user (`summaries` table, ≤15 lines / 1,500 chars). It's sent to the AI as
+background with every message. It never replaces `messages.text`; `/forget` deletes it;
+deleting an item whose words came from chat deletes it so it's rebuilt without them;
+on failure the old one stays and retries wait 10 min.
 
 ## Layout
 
@@ -70,6 +76,14 @@ use the daily cap.
   `offline.py` — rule-based stand-in for `simulate.py --offline`. Any object with
   `respond(message, history, items, now_local, prefer=None, related=())` works as the assistant.
 - `stt.py` — voice-to-text: Groq Whisper → Gemini → Sarvam, whichever keys exist.
+- `sheets.py` — one-way Google Sheet dashboard, two ways: an Apps Script web app the user
+  deploys in their sheet (`apps_script/Code.gs`, secret word required, only Pluto's four tabs)
+  or a service account (google-auth, already installed by google-genai). `core.sheet_tables()`
+  builds the rows; `core.sync_sheet()` writes only when the content changed. No formula
+  injection from chat text: the API path writes `RAW`, the Apps Script path prefixes risky
+  cells with `'` (in Python and again in the script). Keys and the script secret live only in
+  `.env`; `.gitignore` also blocks common key file names. `python bot.py --dashboard-json`
+  prints the same tabs as JSON for updating a sheet through Claude (README, option C).
 - `tests/` — pytest with a fake assistant and fake Telegram objects; no network needed.
 
 ## Working on it

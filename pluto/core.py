@@ -16,7 +16,8 @@ against the user's own items, saves are confirmed with real ids, and a reply
 that cites an item the user does not have is withheld.
 
 `llm` is any object with
-respond(message, history, items, now_local, prefer=None, related=()) -> dict,
+respond(message, history, items, now_local, prefer=None, related=(), summary="") -> dict,
+and (for rolling summaries) summarise(previous, messages, now_local, prefer=None) -> list,
 and choices() -> [(name, label)] for the /model menu.
 (llm.py talks to Gemini; offline.py and the tests provide stand-ins.)
 """
@@ -41,6 +42,11 @@ TITLE_MAX = 120
 MAX_REPLY = 4000  # Telegram's limit is 4096 characters
 HISTORY_TURNS = 30   # most recent messages the assistant sees, word for word
 SEARCH_HITS = 10     # older items, and older messages, found by search for each message
+SUMMARY_BATCH_MIN = 20     # summarise once this many messages have left the recent window
+SUMMARY_BATCH_MAX = 100    # at most this many per summarising call
+SUMMARY_MAX_LINES = 15
+SUMMARY_MAX_CHARS = 1500
+SUMMARY_RETRY = timedelta(minutes=10)  # after a failed summary, wait before trying again
 
 START_TEXT = (
     "Hi, I'm Pluto 👋 Talk to me like you would to an assistant.\n\n"
@@ -54,6 +60,8 @@ START_TEXT = (
     "/list  open items · /done <id> · /snooze <id> (+1 day)\n"
     "/delete <id>  remove forever · /forget  clear our chat history\n"
     "/model  choose which AI thinks first\n"
+    "/summary  what I remember from older chats\n"
+    "/sheet  your Google Sheet dashboard\n"
     "/digest  morning digest (on at 08:30; /digest now to preview)\n"
     "/export  download everything"
 )
@@ -223,7 +231,8 @@ def chat(uid, text, llm, now=None) -> list:
     try:
         result = _normalize(
             llm.respond(text, history_views(history), item_views(rows, now), to_local(now),
-                        prefer=db.get_setting(uid, "model"), related=history_views(related))
+                        prefer=db.get_setting(uid, "model"), related=history_views(related),
+                        summary=current_summary(uid))
         )
     except Exception:
         # Never lose a thought: if the assistant fails, keep the message as a note.
@@ -356,7 +365,8 @@ def choose_model(uid, llm, name) -> Reply:
 
 def export_json(uid) -> str:
     return json.dumps(
-        {"items": db.export_all(uid), "messages": db.export_messages(uid)},
+        {"items": db.export_all(uid), "messages": db.export_messages(uid),
+         "summaries": db.export_summaries(uid)},
         ensure_ascii=False,
         indent=2,
     )
@@ -559,3 +569,188 @@ def cmd_digest(uid, arg=None, now=None) -> Reply:
     return Reply(f"☀️ Morning digest is {state}. It lists what's overdue, what's due today and "
                  "one old idea, and is skipped when there's nothing to say.\n"
                  "/digest now to preview · /digest 07:45 to change the time · /digest off")
+
+
+
+# ---------- rolling summary of older conversation ----------
+
+def current_summary(uid) -> str:
+    row = db.latest_summary(uid)
+    return row["text"] if row else ""
+
+
+def _clean_summary(lines) -> str:
+    """Tidy the model's lines; raise ValueError if they're unusable (fail closed)."""
+    if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+        raise ValueError("summary lines must be strings")
+    out = []
+    for ln in lines:
+        ln = " ".join(ln.split())
+        if not ln or ln.lower().strip("-• ()") in ("nothing", "none"):
+            continue
+        out.append(ln if ln.startswith(("-", "•")) else f"- {ln}")
+    text = "\n".join(out[:SUMMARY_MAX_LINES])
+    if len(text) > SUMMARY_MAX_CHARS:  # cut at a line boundary
+        text = text[:SUMMARY_MAX_CHARS].rsplit("\n", 1)[0]
+    return text
+
+
+def update_summary(uid, llm, now=None, force=False) -> bool:
+    """Fold messages that have left the recent window into the rolling summary.
+
+    Runs when at least SUMMARY_BATCH_MIN such messages are waiting (any number with
+    force=True). On any failure nothing changes (the previous summary stays) and it waits
+    SUMMARY_RETRY before trying again. Returns True if a new summary was stored."""
+    now = now or db.now_utc()
+    if not hasattr(llm, "summarise"):
+        return False
+    retry_after = db.get_setting(uid, "summary_retry_after")
+    if retry_after and not force and db.to_str(now) < retry_after:
+        return False
+    rows, waiting = db.unsummarised_messages(uid, HISTORY_TURNS, SUMMARY_BATCH_MAX)
+    if not rows or (waiting < SUMMARY_BATCH_MIN and not force):
+        return False
+    prev = db.latest_summary(uid)
+    try:
+        lines = llm.summarise(prev["text"] if prev else "", history_views(rows), to_local(now),
+                              prefer=db.get_setting(uid, "model"))
+        text = _clean_summary(lines)
+    except Exception:
+        log.exception("summary failed; keeping the previous one")
+        db.set_setting(uid, "summary_retry_after", db.to_str(now + SUMMARY_RETRY))
+        return False
+    start = prev["from_msg_id"] if prev else rows[0]["id"]
+    db.add_summary(uid, start, rows[-1]["id"], text, now=now)
+    return True
+
+
+def cmd_summary(uid) -> Reply:
+    """/summary: what Pluto remembers about older chats (besides saved items)."""
+    text = current_summary(uid)
+    if not text:
+        return Reply("No summary yet. Once our chat grows past the last 30 messages, I keep a "
+                     "short summary of the older part here. Your saved items are kept separately "
+                     "(/list).")
+    return Reply("🧠 What I remember from our older chats:\n" + text +
+                 "\n\n/forget clears this and the chat history; saved items stay.")
+
+
+# ---------- Google Sheet dashboard (data only; sheets.py does the Google calls) ----------
+
+SHEET_TABS = ("Dashboard", "To-dos", "Done", "Notes & ideas")
+_BUCKET_ORDER = ["overdue", "today", "tomorrow", "this week", "this month", "later", "no date"]
+_PRIORITY_RANK = {"high": 0, "normal": 1, "low": 2}
+
+
+def _local_str(utc_s):
+    return to_local(db.from_str(utc_s)).strftime("%Y-%m-%d %H:%M") if utc_s else ""
+
+
+def sheet_tables(uid, now=None) -> dict:
+    """The user's items as rows for each tab: {tab: [header, row, row, ...]}.
+
+    Every cell is plain text or a number; sheets.py writes them as RAW values, so text
+    a user typed (e.g. starting with "=") can never become a spreadsheet formula."""
+    now = now or db.now_utc()
+    rows = db.export_all(uid)
+    is_todo = lambda r: r["kind"] in ACTION_KINDS or r["due_at"]  # noqa: E731
+    todos = [r for r in rows if r["status"] == "open" and is_todo(r)]
+    notes = [r for r in rows if r["status"] == "open" and not is_todo(r)]
+    done = [r for r in rows if r["status"] != "open"]
+
+    for r in todos:
+        r["_bucket"] = bucket(r["due_at"], now)
+    todos.sort(key=lambda r: (_BUCKET_ORDER.index(r["_bucket"]), r["due_at"] or "9999",
+                              _PRIORITY_RANK.get(r["priority"], 1), r["id"]))
+    notes.sort(key=lambda r: -r["id"])
+    done.sort(key=lambda r: (r["closed_at"] or "", r["id"]), reverse=True)
+
+    def count(pred):
+        return sum(1 for r in todos if pred(r))
+
+    week = {"overdue", "today", "tomorrow", "this week"}
+    week_ago = db.to_str(now - timedelta(days=7))
+    local = to_local(now)
+    dashboard = [
+        ["Pluto dashboard", ""],
+        ["Last updated", f"{local:%Y-%m-%d %H:%M} ({TZ.key})"],
+        ["", ""],
+        ["⚠️ Overdue", count(lambda r: r["_bucket"] == "overdue")],
+        ["📅 Due today", count(lambda r: r["_bucket"] == "today")],
+        ["🗓 Due this week (incl. overdue)", count(lambda r: r["_bucket"] in week)],
+        ["🔴 Urgent (high priority)", count(lambda r: r["priority"] == "high")],
+        ["✅ Open to-dos", len(todos)],
+        ["💡 Open ideas", sum(1 for r in notes if r["kind"] == "idea")],
+        ["📝 Notes", sum(1 for r in notes if r["kind"] == "note")],
+        ["🎉 Finished in the last 7 days",
+         sum(1 for r in done if r["status"] == "done" and (r["closed_at"] or "") >= week_ago)],
+        ["", ""],
+        ["This sheet is updated by Pluto. Edits here are overwritten; change things in Telegram.", ""],
+    ]
+    return {
+        "Dashboard": dashboard,
+        "To-dos": [["ID", "To-do", "Type", "Priority", "Due", "When", "Added", "Your words"]] + [
+            [r["id"], r["title"], r["kind"], r["priority"], _local_str(r["due_at"]),
+             r["_bucket"], _local_str(r["created_at"]), r["original_text"]] for r in todos],
+        "Done": [["ID", "Item", "Type", "Status", "Finished", "Due", "Added"]] + [
+            [r["id"], r["title"], r["kind"], r["status"], _local_str(r["closed_at"]),
+             _local_str(r["due_at"]), _local_str(r["created_at"])] for r in done],
+        "Notes & ideas": [["ID", "Note / idea", "Type", "Added", "Your words"]] + [
+            [r["id"], r["title"], r["kind"], _local_str(r["created_at"]), r["original_text"]]
+            for r in notes],
+    }
+
+
+def _fingerprint(tables) -> str:
+    """A hash of the sheet contents, ignoring the 'Last updated' time, so an unchanged
+    dashboard isn't rewritten every few minutes."""
+    import hashlib
+
+    stable = {t: rows for t, rows in tables.items() if t != "Dashboard"}
+    stable["Dashboard"] = [r for r in tables.get("Dashboard", []) if r[:1] != ["Last updated"]]
+    return hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def sync_sheet(uid, push, force=False, now=None) -> str:
+    """Write this user's dashboard with `push(tables)` (sheets.push) if anything changed.
+
+    Returns "synced" or "unchanged". On failure, records the error for /sheet and
+    re-raises; the next run tries again."""
+    now = now or db.now_utc()
+    tables = sheet_tables(uid, now)
+    fp = _fingerprint(tables)
+    if not force and db.get_setting(uid, "sheet_hash") == fp:
+        return "unchanged"
+    try:
+        link = push(tables)
+    except Exception as e:
+        db.set_setting(uid, "sheet_error", str(e)[:300])
+        raise
+    if isinstance(link, str) and link:
+        db.set_setting(uid, "sheet_url", link)
+    db.set_setting(uid, "sheet_hash", fp)
+    db.set_setting(uid, "sheet_synced_at", db.to_str(now))
+    db.set_setting(uid, "sheet_error", "")
+    return "synced"
+
+
+def cmd_sheet(uid, problem, link, robot_email="") -> Reply:
+    """/sheet: where the dashboard is and whether syncing works."""
+    if problem == "not set up":
+        return Reply(
+            "📊 No Google Sheet dashboard yet. The easiest setup (about 5 minutes) is in the "
+            "README under “Google Sheet dashboard”: paste Pluto's Apps Script into your sheet, "
+            "deploy it, and add GOOGLE_APPS_SCRIPT_URL and GOOGLE_APPS_SCRIPT_SECRET to .env.")
+    if problem:
+        return Reply(f"📊 The Google Sheet dashboard can't sync: {problem}.")
+    synced = db.get_setting(uid, "sheet_synced_at")
+    when = f"{to_local(db.from_str(synced)):%a %d %b, %H:%M}" if synced else "not yet"
+    link = link or db.get_setting(uid, "sheet_url", "") or "(the link appears after the first update)"
+    lines = [f"📊 Your dashboard: {link}", f"Last updated: {when} (checked every 5 minutes)."]
+    err = db.get_setting(uid, "sheet_error")
+    if err:
+        lines.append(f"⚠️ Last attempt failed: {err}")
+        if robot_email and ("403" in err or "permission" in err.lower()):
+            lines.append(f"Share the sheet with {robot_email} as Editor, then send /sheet now.")
+    lines.append("/sheet now to update it right away.")
+    return Reply("\n".join(lines))

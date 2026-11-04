@@ -32,9 +32,10 @@ class FakeLLM:
     def choices(self):
         return self._choices
 
-    def respond(self, message, history, items, now_local, prefer=None, related=()):
+    def respond(self, message, history, items, now_local, prefer=None, related=(), summary=""):
         self.calls.append({"message": message, "history": list(history), "items": list(items),
-                           "now": now_local, "prefer": prefer, "related": list(related)})
+                           "now": now_local, "prefer": prefer, "related": list(related),
+                           "summary": summary})
         r = self._result
         if isinstance(r, Exception):
             raise r

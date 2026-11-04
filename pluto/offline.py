@@ -110,8 +110,18 @@ def choices() -> list:
     return []  # the offline stand-in has no models to choose from
 
 
+def summarise(previous: str, messages: list, now_local: datetime, prefer=None) -> list:
+    """Rough stand-in for llm.summarise: keeps the person's substantive messages as lines."""
+    lines = [ln for ln in (previous or "").splitlines() if ln.strip()]
+    for m in messages:
+        text = m["text"].strip()
+        if m["role"] == "user" and len(_words(text)) >= 2 and not GREETINGS.match(text.lower()):
+            lines.append(f"- {text[:100]} ({m['when'][4:14]})")
+    return lines[-15:]
+
+
 def respond(message: str, history: list, items: list, now_local: datetime, prefer=None,
-            related=()) -> dict:
+            related=(), summary="") -> dict:
     text = message.strip()
     t = text.lower()
     last_pluto = next((m["text"] for m in reversed(history) if m["role"] == "pluto"), "")

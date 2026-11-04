@@ -54,7 +54,7 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/forget` (clear chat history) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/forget` (clear chat history and its summary) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
 
 ## Morning digest
 
@@ -82,6 +82,78 @@ One message each morning (08:30 by default, in `PLUTO_TZ`):
 - Items due later today still get their own reminder at their time. Overdue items shown in the digest don't get a repeat nudge right after it.
 - With the digest on, old ideas come up only in the digest. With `/digest off`, they get their own nudges as before.
 
+## Google Sheet dashboard (optional)
+
+Pluto can keep a Google Sheet up to date with four tabs:
+- **Dashboard:** overdue, due today, due this week, urgent, open to-dos, ideas, notes, and finished in the last 7 days.
+- **To-dos:** every open to-do and reminder, most urgent first, with priority, due date and your own words.
+- **Done:** finished and dropped items, with when.
+- **Notes & ideas:** everything else you saved.
+
+With option A or B, Pluto checks every 5 minutes and writes only when something changed. It's **one-way**: edits
+you make in the sheet are overwritten, so mark things done in Telegram. Text is always stored as plain text, so
+nothing you typed can turn into a spreadsheet formula. Your items will also be stored in Google once you turn this on.
+
+There are three ways to connect it. Pick one.
+
+### Option A: Apps Script link (easiest, about 5 minutes, no Google Cloud)
+
+1. Create a Google Sheet ([sheets.new](https://sheets.new)) and name it e.g. "Pluto dashboard".
+2. **Extensions → Apps Script**. Delete what's there and paste the whole of
+   [`apps_script/Code.gs`](apps_script/Code.gs).
+3. On the `const SECRET = ...` line, replace `CHANGE-ME-to-a-long-random-word` with a long random word
+   (at least 16 characters, e.g. from `python3 -c "import secrets; print(secrets.token_urlsafe(24))"`). Save.
+4. **Deploy → New deployment →** gear icon **→ Web app**. Set *Execute as*: **Me** and
+   *Who has access*: **Anyone**, then **Deploy**. Google asks you to allow access: choose your account,
+   then **Advanced → Go to (project) (unsafe) → Allow**. That warning appears because this is your own unreviewed script.
+5. Copy the **Web app URL** (it ends in `/exec`) and put both values in `.env`:
+   ```
+   GOOGLE_APPS_SCRIPT_URL=https://script.google.com/macros/s/.../exec
+   GOOGLE_APPS_SCRIPT_SECRET=<the same word as in the script>
+   ```
+6. `python bot.py --check` should show `Google Sheet: ✓ via Apps Script`. Restart the bot and send `/sheet now`.
+
+"Anyone" only means the link works without a Google login. Every request must carry your secret word or the script
+refuses it, and the script only touches Pluto's four tabs. Keep the URL and the word private, like your other keys.
+If you edit the script later, use **Deploy → Manage deployments → Edit → New version** so the same URL keeps working.
+
+### Option B: service account (for people who already use Google Cloud)
+
+1. At [console.cloud.google.com](https://console.cloud.google.com), pick a project. The one AI Studio made for your Gemini key works.
+2. **APIs & Services → Library** → **Google Sheets API** → **Enable**.
+3. **APIs & Services → Credentials → Create credentials → Service account**. Name it `pluto` → **Done**. No roles are needed.
+4. Open it → **Keys → Add key → Create new key → JSON**. Keep the downloaded file **outside** the Pluto folder; it's a password:
+   ```bash
+   mkdir -p ~/.config/pluto && mv ~/Downloads/<the-file>.json ~/.config/pluto/service-account.json && chmod 600 ~/.config/pluto/service-account.json
+   ```
+5. Share your Google Sheet with the service account's email (it ends in `.iam.gserviceaccount.com`) as **Editor**.
+6. In `.env`:
+   ```
+   GOOGLE_SHEETS_ID=https://docs.google.com/spreadsheets/d/...your sheet's URL...
+   GOOGLE_SERVICE_ACCOUNT_FILE=~/.config/pluto/service-account.json
+   ```
+7. `python bot.py --check` should show `Google Sheet: ✓ via service account`. Restart the bot and send `/sheet now`.
+
+If `/sheet` says permission was denied, the sheet isn't shared with that email yet. A work Google account may block
+creating keys; use Option A then. If both options are set, the service account is used.
+
+### Option C: ask Claude to update it (no setup, not automatic)
+
+If your Claude account has the Google Sheets connector, Claude can copy the dashboard into a sheet whenever you ask.
+The sheet only changes when you ask, and your items pass through Claude as well as Google. In `~/Heera-AI/pluto`,
+open Claude Code (`claude`) and paste:
+
+```
+Run `.venv/bin/python bot.py --dashboard-json` in this folder. It prints JSON shaped like
+{"<tab name>": [[header...], [row...], ...]} for four tabs: Dashboard, To-dos, Done, Notes & ideas.
+Using the Google Sheets connector, open my spreadsheet named "Pluto dashboard" (create it if it
+doesn't exist). For each tab in the JSON: create the tab if it's missing, clear it, and write the
+rows exactly as given starting at A1. Write every value as plain text or a number, never as a
+formula (if a cell starts with = + - or @, keep it as text), and make the first row bold.
+Don't change other tabs, don't modify pluto.db or any other file, and don't send this data
+anywhere else. When done, tell me the sheet's link and how many rows each tab has.
+```
+
 ## How reminders and nudges work
 
 - Checked every minute while the bot is running.
@@ -106,5 +178,6 @@ The bot must be running to nudge.
 ## Known limits
 
 - **Search:** each message sends the AI your open items (the 150 most urgent), the 20 most recently finished, and the last 30 chat messages. On top of that, it sends up to 10 older items and 10 older messages that contain the same words, found with SQLite's built-in full-text search (FTS5). So "what did we discuss about Goa?" reaches back to your very first message, while each message stays small. Search matches **words, not meaning**: "beach holiday" won't find "Goa trip", and Hindi in Devanagari won't match the same word typed in Latin letters. If your Python's SQLite lacks FTS5, Pluto falls back to a slower plain-text search.
+- **Rolling summary:** once 20 or more messages have scrolled out of the last 30, Pluto asks the AI (in the background, checked every minute) to fold them into a short summary of older chats: plans, people, decisions, preferences, at most 15 lines. Every reply gets that summary as background. `/summary` shows it, `/forget` clears it, and `/delete` throws it away so it's rebuilt without the deleted words. If the AI fails, the old summary stays and it tries again 10 minutes later. Your saved items and messages are never changed by this.
 - Voice notes: Groq `whisper-large-v3` → Gemini → Sarvam `saarika:v2.5` (`STT_PROVIDERS` changes the order).
 - AI providers are tried in order Gemini → Groq → Z AI → NVIDIA Nemotron (`PLUTO_PROVIDERS` changes it, and `/model` in chat picks which one goes first; the rest stay as backup). Default models: `gemini-2.5-flash`, `llama-3.3-70b-versatile` (Groq), `glm-4.6` (Z AI), `nvidia/nemotron-3.5-super-vl-120b-a12b` (NVIDIA, with thinking off for quick replies; `NVIDIA_THINKING=1` turns it on); change `PLUTO_MODEL`, `GROQ_MODEL`, `ZAI_MODEL`, `NVIDIA_MODEL` if a provider retires one. Fallback models may phrase replies differently, but the code-side checks (what gets saved, never citing unknown items) apply to all of them.
