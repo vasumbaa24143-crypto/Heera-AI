@@ -54,7 +54,7 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/forget` (clear chat history and its summary) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/forget` (clear chat history and its summary) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
 
 ## Morning digest
 
@@ -81,6 +81,39 @@ One message each morning (08:30 by default, in `PLUTO_TZ`):
 - If the bot was off at digest time, it catches up within 4 hours; later than that, it skips the day.
 - Items due later today still get their own reminder at their time. Overdue items shown in the digest don't get a repeat nudge right after it.
 - With the digest on, old ideas come up only in the digest. With `/digest off`, they get their own nudges as before.
+
+## Google Sheet dashboard (optional)
+
+Pluto can keep a Google Sheet up to date with four tabs:
+- **Dashboard:** overdue, due today, due this week, urgent, open to-dos, ideas, notes, and finished in the last 7 days.
+- **To-dos:** every open to-do and reminder, most urgent first, with priority, due date and your own words.
+- **Done:** finished and dropped items, with when.
+- **Notes & ideas:** everything else you saved.
+
+It checks every 5 minutes and writes only when something changed. It's **one-way**: edits you make in the
+sheet are overwritten, so mark things done in Telegram. Text is written as plain values, so nothing you typed
+can turn into a spreadsheet formula. Your items will also be stored in Google once you turn this on.
+
+**Setup (about 10 minutes, once):**
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project (any name).
+2. **APIs & Services → Library** → search **Google Sheets API** → **Enable**.
+3. **APIs & Services → Credentials → Create credentials → Service account**. Name it `pluto`, then **Done**. No roles are needed.
+4. Open the new service account → **Keys → Add key → Create new key → JSON**. A `.json` file downloads. Keep it **outside** the Pluto folder; it's a password:
+   ```bash
+   mkdir -p ~/.config/pluto && mv ~/Downloads/*.json ~/.config/pluto/service-account.json && chmod 600 ~/.config/pluto/service-account.json
+   ```
+   (If `~/Downloads` has other `.json` files, move just the new one by name.)
+5. Create an empty Google Sheet ([sheets.new](https://sheets.new)) → **Share** → paste the service account's email (it ends in `.iam.gserviceaccount.com` and is shown on its page) → **Editor** → untick "Notify" → **Share**.
+6. In `.env`:
+   ```
+   GOOGLE_SHEETS_ID=https://docs.google.com/spreadsheets/d/...your sheet's URL...
+   GOOGLE_SERVICE_ACCOUNT_FILE=~/.config/pluto/service-account.json
+   ```
+7. `python bot.py --check` should show `Google Sheet: ✓ …`. Restart the bot and send `/sheet now`.
+
+If `/sheet` says permission was denied, the sheet isn't shared with the service account's email yet (step 5).
+A work Google account may block creating keys; a personal Gmail account works.
 
 ## How reminders and nudges work
 

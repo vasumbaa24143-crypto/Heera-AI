@@ -62,6 +62,8 @@ def init() -> None:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(items)")}
         if "priority" not in cols:  # databases made before priorities existed
             c.execute("ALTER TABLE items ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'")
+        if "closed_at" not in cols:  # when it was marked done or dropped (NULL while open)
+            c.execute("ALTER TABLE items ADD COLUMN closed_at TEXT")
         c.execute(
             """CREATE TABLE IF NOT EXISTS nudges(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -419,13 +421,14 @@ def export_messages(user_id):
     return [dict(r) for r in rows]
 
 
-def set_status(user_id, item_id, status) -> bool:
+def set_status(user_id, item_id, status, now=None) -> bool:
     if status not in STATUSES:
         raise ValueError(f"unknown status {status!r}")
+    closed = None if status == "open" else to_str(now or now_utc())
     with conn() as c:
         cur = c.execute(
-            "UPDATE items SET status=? WHERE id=? AND user_id=?",
-            (status, item_id, user_id),
+            "UPDATE items SET status=?, closed_at=? WHERE id=? AND user_id=?",
+            (status, closed, item_id, user_id),
         )
         return cur.rowcount > 0
 
