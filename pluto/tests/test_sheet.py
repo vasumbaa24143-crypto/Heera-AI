@@ -15,6 +15,14 @@ from conftest import NOW
 
 UID, OTHER = 111, 222
 H, D = timedelta(hours=1), timedelta(days=1)
+GOOGLE_VARS = ("GOOGLE_SHEETS_ID", "GOOGLE_SERVICE_ACCOUNT_FILE",
+               "GOOGLE_APPS_SCRIPT_URL", "GOOGLE_APPS_SCRIPT_SECRET")
+
+
+@pytest.fixture(autouse=True)
+def no_google_env(monkeypatch):
+    for k in GOOGLE_VARS:
+        monkeypatch.delenv(k, raising=False)
 
 
 def add(title, kind="task", due=None, priority="normal", text=None, uid=UID, created=NOW - D):
@@ -249,4 +257,121 @@ def test_sheet_now_command_forces_a_sync(configured, monkeypatch):
 
 
 def test_key_check_shows_the_sheet(configured):
-    assert "Google Sheet: ✓ https://docs.google.com/spreadsheets/d/abc123_-XYZ/edit" in bot.key_report()
+    assert "Google Sheet: ✓ via service account" in bot.key_report()
+
+
+# ---------- Apps Script link ----------
+
+SCRIPT = "https://script.google.com/macros/s/AKfycbx_TestDeployment-123/exec"
+
+
+@pytest.fixture
+def script(monkeypatch):
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_URL", SCRIPT)
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_SECRET", "a-long-random-secret-word")
+    calls = []
+
+    def fake_post(payload):
+        calls.append(payload)
+        return {"ok": True, "url": "https://docs.google.com/spreadsheets/d/FROMSCRIPT/edit"}
+
+    monkeypatch.setattr(sheets, "_post_script", fake_post)
+    return calls
+
+
+def test_apps_script_is_chosen_and_validated(monkeypatch):
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_URL", SCRIPT)
+    assert sheets.mode() == "apps_script"
+    assert "GOOGLE_APPS_SCRIPT_SECRET must be set" in sheets.problem()
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_SECRET", "short")
+    assert "at least 16" in sheets.problem()
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_SECRET", "a-long-random-secret-word")
+    assert sheets.problem() == "" and sheets.enabled()
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_URL", "https://evil.example.com/exec")
+    assert "ending in /exec" in sheets.problem()
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_URL", SCRIPT + "/../dev")
+    assert sheets.problem() != ""
+
+
+def test_service_account_wins_when_both_are_set(configured, monkeypatch):
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_URL", SCRIPT)
+    assert sheets.mode() == "service_account"
+    assert sheets.service_account_email().startswith("pluto-bot@")
+
+
+def test_apps_script_push_sends_secret_and_safe_text(script):
+    add("=HYPERLINK(\"http://evil\")", text="+cmd|calc")
+    add("normal text")
+    link = sheets.push(core.sheet_tables(UID, NOW))
+    assert link == "https://docs.google.com/spreadsheets/d/FROMSCRIPT/edit"
+    [payload] = script
+    assert payload["secret"] == "a-long-random-secret-word"
+    assert list(payload["tables"]) == list(core.SHEET_TABS)
+    rows = payload["tables"]["To-dos"]
+    risky = next(r for r in rows if "HYPERLINK" in str(r[1]))
+    assert risky[1] == "'=HYPERLINK(\"http://evil\")" and risky[7] == "'+cmd|calc"
+    assert any(r[1] == "normal text" for r in rows)
+    assert isinstance(rows[1][0], int)                       # numbers stay numbers
+
+
+def test_as_text():
+    assert [sheets.as_text(v) for v in ["=1+1", "+1", "-x", "@me", "ok", "'=already", 5, None]] == \
+        ["'=1+1", "'+1", "'-x", "'@me", "ok", "'=already", 5, None]
+
+
+def test_apps_script_errors_are_readable(script, monkeypatch):
+    monkeypatch.setattr(sheets, "_post_script", lambda p: {"ok": False, "error": "wrong secret"})
+    with pytest.raises(sheets.SheetError, match="Apps Script: wrong secret"):
+        sheets.push(core.sheet_tables(UID, NOW))
+
+    def unreachable(p):
+        raise sheets.httpx.ConnectError("no route")
+
+    monkeypatch.setattr(sheets, "_post_script", unreachable)
+    with pytest.raises(sheets.SheetError, match="couldn't reach the Apps Script link"):
+        sheets.push(core.sheet_tables(UID, NOW))
+
+
+def test_link_learned_from_the_script_is_shown(script):
+    add("Call bank")
+    core.sync_sheet(UID, sheets.push, now=NOW)
+    assert db.get_setting(UID, "sheet_url") == "https://docs.google.com/spreadsheets/d/FROMSCRIPT/edit"
+    text = core.cmd_sheet(UID, sheets.problem(), sheets.url()).text
+    assert text.startswith("📊 Your dashboard: https://docs.google.com/spreadsheets/d/FROMSCRIPT/edit")
+
+
+def test_not_set_up_message_points_to_apps_script():
+    assert "GOOGLE_APPS_SCRIPT_URL" in core.cmd_sheet(UID, "not set up", "").text
+
+
+def test_key_check_shows_apps_script(script):
+    assert "Google Sheet: ✓ via Apps Script" in bot.key_report()
+
+
+def test_apps_script_file_has_the_safety_checks():
+    import pathlib
+    gs = (pathlib.Path(sheets.__file__).parent / "apps_script" / "Code.gs").read_text()
+    assert "body.secret !== SECRET" in gs                     # refuses requests without the secret
+    assert "SECRET.indexOf('CHANGE-ME') === 0" in gs          # refuses to run with the placeholder
+    assert "TABS.indexOf(name) === -1" in gs                  # only touches Pluto's own tabs
+    assert "/^[=+\\-@]/.test(s)" in gs                        # formula-looking text stays text
+    assert "setValues(values)" in gs and "ok: true, url: ss.getUrl()" in gs
+
+
+# ---------- the Claude route: --dashboard-json ----------
+
+def test_dashboard_json_prints_the_tabs(monkeypatch, capsys):
+    monkeypatch.setattr(bot, "ALLOWED", str(UID))
+    monkeypatch.setattr(bot.sys, "argv", ["bot.py", "--dashboard-json"])
+    add("Call bank")
+    add("not mine", uid=OTHER)
+    bot.main()
+    data = json.loads(capsys.readouterr().out)
+    assert list(data) == list(core.SHEET_TABS)
+    assert [r[1] for r in data["To-dos"][1:]] == ["Call bank"]
+
+
+def test_dashboard_json_needs_the_allowed_user(monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED", "")
+    with pytest.raises(SystemExit, match="ALLOWED_USER_ID"):
+        bot.dashboard_json()

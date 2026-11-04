@@ -4,6 +4,7 @@ This file only translates between Telegram and core.py, which holds the flow.
 """
 import asyncio
 import io
+import json
 import logging
 import os
 import sys
@@ -312,7 +313,9 @@ KEY_REPORT = [
     ("ZAI_API_KEY", "Z AI", "AI"),
     ("NVIDIA_API_KEY", "NVIDIA Nemotron", "AI"),
     ("SARVAM_API_KEY", "Sarvam (voice backup)", "optional"),
-    ("GOOGLE_SHEETS_ID", "Google Sheet dashboard (sheet id or URL)", "optional"),
+    ("GOOGLE_APPS_SCRIPT_URL", "Google Sheet via Apps Script (web app link)", "optional"),
+    ("GOOGLE_APPS_SCRIPT_SECRET", "Apps Script secret word", "optional"),
+    ("GOOGLE_SHEETS_ID", "Google Sheet via service account (sheet id or URL)", "optional"),
     ("GOOGLE_SERVICE_ACCOUNT_FILE", "Google service account key file (path)", "optional"),
 ]
 
@@ -327,15 +330,27 @@ def key_report() -> str:
     lines.append(f"AI order: {llm.describe()}")
     voice = " → ".join(stt.providers()) or f"✗ none (add {stt.KEY_NAMES})"
     lines.append(f"Voice notes: {voice}")
-    lines.append(f"Google Sheet: {'✓ ' + sheets.url() if not sheets.problem() else sheets.problem()}")
+    how = {"apps_script": "Apps Script", "service_account": "service account"}.get(sheets.mode(), "")
+    lines.append(f"Google Sheet: {f'✓ via {how}' if not sheets.problem() else sheets.problem()}")
     if not llm.providers():
         lines.append("✗ Set at least one AI key.")
     return "\n".join(lines)
 
 
+def dashboard_json() -> str:
+    """The dashboard tabs as JSON ({tab: rows}), for updating a sheet by hand or via Claude."""
+    if not ALLOWED.isdigit():
+        raise SystemExit("ALLOWED_USER_ID must be set in .env to know whose items to export.")
+    db.init()
+    return json.dumps(core.sheet_tables(int(ALLOWED)), ensure_ascii=False)
+
+
 def main() -> None:
     if "--check" in sys.argv[1:]:
         print(key_report())
+        return
+    if "--dashboard-json" in sys.argv[1:]:
+        print(dashboard_json())
         return
     check_config()
     db.init()

@@ -722,10 +722,12 @@ def sync_sheet(uid, push, force=False, now=None) -> str:
     if not force and db.get_setting(uid, "sheet_hash") == fp:
         return "unchanged"
     try:
-        push(tables)
+        link = push(tables)
     except Exception as e:
         db.set_setting(uid, "sheet_error", str(e)[:300])
         raise
+    if isinstance(link, str) and link:
+        db.set_setting(uid, "sheet_url", link)
     db.set_setting(uid, "sheet_hash", fp)
     db.set_setting(uid, "sheet_synced_at", db.to_str(now))
     db.set_setting(uid, "sheet_error", "")
@@ -736,13 +738,14 @@ def cmd_sheet(uid, problem, link, robot_email="") -> Reply:
     """/sheet: where the dashboard is and whether syncing works."""
     if problem == "not set up":
         return Reply(
-            "📊 No Google Sheet dashboard yet. To set one up (about 10 minutes), follow "
-            "“Google Sheet dashboard” in the README: make a Google service account, share an "
-            "empty sheet with it, and add GOOGLE_SHEETS_ID and GOOGLE_SERVICE_ACCOUNT_FILE to .env.")
+            "📊 No Google Sheet dashboard yet. The easiest setup (about 5 minutes) is in the "
+            "README under “Google Sheet dashboard”: paste Pluto's Apps Script into your sheet, "
+            "deploy it, and add GOOGLE_APPS_SCRIPT_URL and GOOGLE_APPS_SCRIPT_SECRET to .env.")
     if problem:
         return Reply(f"📊 The Google Sheet dashboard can't sync: {problem}.")
     synced = db.get_setting(uid, "sheet_synced_at")
     when = f"{to_local(db.from_str(synced)):%a %d %b, %H:%M}" if synced else "not yet"
+    link = link or db.get_setting(uid, "sheet_url", "") or "(the link appears after the first update)"
     lines = [f"📊 Your dashboard: {link}", f"Last updated: {when} (checked every 5 minutes)."]
     err = db.get_setting(uid, "sheet_error")
     if err:

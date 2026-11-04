@@ -76,11 +76,14 @@ on failure the old one stays and retries wait 10 min.
   `offline.py` — rule-based stand-in for `simulate.py --offline`. Any object with
   `respond(message, history, items, now_local, prefer=None, related=())` works as the assistant.
 - `stt.py` — voice-to-text: Groq Whisper → Gemini → Sarvam, whichever keys exist.
-- `sheets.py` — one-way Google Sheet dashboard via a service account (google-auth, already
-  installed by google-genai). `core.sheet_tables()` builds the rows; `core.sync_sheet()` writes
-  only when the content changed; values are always written `RAW` (no formula injection from
-  chat text). The service account key file lives outside the repo; `.gitignore` also blocks
-  common key file names.
+- `sheets.py` — one-way Google Sheet dashboard, two ways: an Apps Script web app the user
+  deploys in their sheet (`apps_script/Code.gs`, secret word required, only Pluto's four tabs)
+  or a service account (google-auth, already installed by google-genai). `core.sheet_tables()`
+  builds the rows; `core.sync_sheet()` writes only when the content changed. No formula
+  injection from chat text: the API path writes `RAW`, the Apps Script path prefixes risky
+  cells with `'` (in Python and again in the script). Keys and the script secret live only in
+  `.env`; `.gitignore` also blocks common key file names. `python bot.py --dashboard-json`
+  prints the same tabs as JSON for updating a sheet through Claude (README, option C).
 - `tests/` — pytest with a fake assistant and fake Telegram objects; no network needed.
 
 ## Working on it

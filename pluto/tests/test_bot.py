@@ -271,11 +271,11 @@ def test_key_check_lists_every_key_and_never_shows_values(monkeypatch):
         monkeypatch.delenv(n, raising=False)
     monkeypatch.delenv("Z_AI_API_KEY", raising=False)
     monkeypatch.delenv("PLUTO_PROVIDERS", raising=False)
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:SECRET-TG")
-    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-SECRET")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:VALUE-SHOULD-NOT-SHOW-TG")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-VALUE-SHOULD-NOT-SHOW")
     out = bot.key_report()
     for n, _, _ in bot.KEY_REPORT:
         assert n in out
-    assert "SECRET" not in out
+    assert "VALUE-SHOULD-NOT-SHOW" not in out
     assert "✓ set      NVIDIA_API_KEY" in out and "✗ MISSING  ALLOWED_USER_ID" in out
     assert "AI order: NVIDIA Nemotron" in out

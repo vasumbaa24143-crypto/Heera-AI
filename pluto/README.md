@@ -90,30 +90,69 @@ Pluto can keep a Google Sheet up to date with four tabs:
 - **Done:** finished and dropped items, with when.
 - **Notes & ideas:** everything else you saved.
 
-It checks every 5 minutes and writes only when something changed. It's **one-way**: edits you make in the
-sheet are overwritten, so mark things done in Telegram. Text is written as plain values, so nothing you typed
-can turn into a spreadsheet formula. Your items will also be stored in Google once you turn this on.
+With option A or B, Pluto checks every 5 minutes and writes only when something changed. It's **one-way**: edits
+you make in the sheet are overwritten, so mark things done in Telegram. Text is always stored as plain text, so
+nothing you typed can turn into a spreadsheet formula. Your items will also be stored in Google once you turn this on.
 
-**Setup (about 10 minutes, once):**
+There are three ways to connect it. Pick one.
 
-1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project (any name).
-2. **APIs & Services → Library** → search **Google Sheets API** → **Enable**.
-3. **APIs & Services → Credentials → Create credentials → Service account**. Name it `pluto`, then **Done**. No roles are needed.
-4. Open the new service account → **Keys → Add key → Create new key → JSON**. A `.json` file downloads. Keep it **outside** the Pluto folder; it's a password:
-   ```bash
-   mkdir -p ~/.config/pluto && mv ~/Downloads/*.json ~/.config/pluto/service-account.json && chmod 600 ~/.config/pluto/service-account.json
+### Option A: Apps Script link (easiest, about 5 minutes, no Google Cloud)
+
+1. Create a Google Sheet ([sheets.new](https://sheets.new)) and name it e.g. "Pluto dashboard".
+2. **Extensions → Apps Script**. Delete what's there and paste the whole of
+   [`apps_script/Code.gs`](apps_script/Code.gs).
+3. On the `const SECRET = ...` line, replace `CHANGE-ME-to-a-long-random-word` with a long random word
+   (at least 16 characters, e.g. from `python3 -c "import secrets; print(secrets.token_urlsafe(24))"`). Save.
+4. **Deploy → New deployment →** gear icon **→ Web app**. Set *Execute as*: **Me** and
+   *Who has access*: **Anyone**, then **Deploy**. Google asks you to allow access: choose your account,
+   then **Advanced → Go to (project) (unsafe) → Allow**. That warning appears because this is your own unreviewed script.
+5. Copy the **Web app URL** (it ends in `/exec`) and put both values in `.env`:
    ```
-   (If `~/Downloads` has other `.json` files, move just the new one by name.)
-5. Create an empty Google Sheet ([sheets.new](https://sheets.new)) → **Share** → paste the service account's email (it ends in `.iam.gserviceaccount.com` and is shown on its page) → **Editor** → untick "Notify" → **Share**.
+   GOOGLE_APPS_SCRIPT_URL=https://script.google.com/macros/s/.../exec
+   GOOGLE_APPS_SCRIPT_SECRET=<the same word as in the script>
+   ```
+6. `python bot.py --check` should show `Google Sheet: ✓ via Apps Script`. Restart the bot and send `/sheet now`.
+
+"Anyone" only means the link works without a Google login. Every request must carry your secret word or the script
+refuses it, and the script only touches Pluto's four tabs. Keep the URL and the word private, like your other keys.
+If you edit the script later, use **Deploy → Manage deployments → Edit → New version** so the same URL keeps working.
+
+### Option B: service account (for people who already use Google Cloud)
+
+1. At [console.cloud.google.com](https://console.cloud.google.com), pick a project. The one AI Studio made for your Gemini key works.
+2. **APIs & Services → Library** → **Google Sheets API** → **Enable**.
+3. **APIs & Services → Credentials → Create credentials → Service account**. Name it `pluto` → **Done**. No roles are needed.
+4. Open it → **Keys → Add key → Create new key → JSON**. Keep the downloaded file **outside** the Pluto folder; it's a password:
+   ```bash
+   mkdir -p ~/.config/pluto && mv ~/Downloads/<the-file>.json ~/.config/pluto/service-account.json && chmod 600 ~/.config/pluto/service-account.json
+   ```
+5. Share your Google Sheet with the service account's email (it ends in `.iam.gserviceaccount.com`) as **Editor**.
 6. In `.env`:
    ```
    GOOGLE_SHEETS_ID=https://docs.google.com/spreadsheets/d/...your sheet's URL...
    GOOGLE_SERVICE_ACCOUNT_FILE=~/.config/pluto/service-account.json
    ```
-7. `python bot.py --check` should show `Google Sheet: ✓ …`. Restart the bot and send `/sheet now`.
+7. `python bot.py --check` should show `Google Sheet: ✓ via service account`. Restart the bot and send `/sheet now`.
 
-If `/sheet` says permission was denied, the sheet isn't shared with the service account's email yet (step 5).
-A work Google account may block creating keys; a personal Gmail account works.
+If `/sheet` says permission was denied, the sheet isn't shared with that email yet. A work Google account may block
+creating keys; use Option A then. If both options are set, the service account is used.
+
+### Option C: ask Claude to update it (no setup, not automatic)
+
+If your Claude account has the Google Sheets connector, Claude can copy the dashboard into a sheet whenever you ask.
+The sheet only changes when you ask, and your items pass through Claude as well as Google. In `~/Heera-AI/pluto`,
+open Claude Code (`claude`) and paste:
+
+```
+Run `.venv/bin/python bot.py --dashboard-json` in this folder. It prints JSON shaped like
+{"<tab name>": [[header...], [row...], ...]} for four tabs: Dashboard, To-dos, Done, Notes & ideas.
+Using the Google Sheets connector, open my spreadsheet named "Pluto dashboard" (create it if it
+doesn't exist). For each tab in the JSON: create the tab if it's missing, clear it, and write the
+rows exactly as given starting at A1. Write every value as plain text or a number, never as a
+formula (if a cell starts with = + - or @, keep it as text), and make the first row bold.
+Don't change other tabs, don't modify pluto.db or any other file, and don't send this data
+anywhere else. When done, tell me the sheet's link and how many rows each tab has.
+```
 
 ## How reminders and nudges work
 
