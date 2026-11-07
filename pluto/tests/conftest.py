@@ -9,9 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("PLUTO_TZ", "Asia/Kolkata")
 
 import db  # noqa: E402
-import sheets  # noqa: E402
+import sheet_reader  # noqa: E402
 
-REAL_TOKEN = sheets._token  # kept so one test can exercise it; every other test is blocked from it
+REAL_TOKEN = sheet_reader._token  # kept so one test can exercise it; every other test is blocked from it
 
 # Monday 2 Nov 2026, 12:00 in India (06:30 UTC) - well outside quiet hours.
 NOW = datetime(2026, 11, 2, 6, 30, tzinfo=timezone.utc)
@@ -25,18 +25,14 @@ def fresh_db(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_google(monkeypatch):
-    """No test sees the developer's real Google settings or can sign in to Google, and the
-    Sheets item log starts every test with nothing pending."""
-    for k in ("GOOGLE_SERVICE_ACCOUNT_FILE", "GOOGLE_SERVICE_ACCOUNT_JSON",
-              "PLUTO_LOG_SHEET_ID", "PLUTO_LOG_ORIGINAL"):
-        monkeypatch.delenv(k, raising=False)
+    """No test sees the developer's real Google settings or can sign in to Google."""
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
 
     def no_sign_in():
         raise AssertionError("a test tried to sign in to Google")
 
-    monkeypatch.setattr(sheets, "_token", no_sign_in)
-    monkeypatch.setattr(db, "on_change", None)
-    sheets._reset()
+    monkeypatch.setattr(sheet_reader, "_token", no_sign_in)
+    sheet_reader._reset()
 
 
 class FakeLLM:

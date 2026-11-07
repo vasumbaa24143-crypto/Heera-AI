@@ -26,7 +26,7 @@ from telegram.ext import (  # noqa: E402
 import core  # noqa: E402
 import db  # noqa: E402
 import llm  # noqa: E402
-import sheets  # noqa: E402
+import sheet_reader  # noqa: E402
 import stt  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -35,7 +35,6 @@ log = logging.getLogger("pluto")
 
 ALLOWED = os.getenv("ALLOWED_USER_ID", "").strip()  # only this Telegram user may use the bot
 NUDGE_EVERY_SECONDS = 60  # reminders arrive within a minute of their time
-SHEET_EVERY_SECONDS = 60  # the Google Sheets item log catches up within a minute of a change
 
 
 def allowed(update: Update) -> bool:
@@ -220,12 +219,6 @@ async def digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         core.digest_done(uid, to_mark, now)
 
 
-async def sheet_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Keep the Google Sheets item log up to date (does nothing unless an item changed)."""
-    if ALLOWED.isdigit():
-        await asyncio.to_thread(core.sync_sheet_log, int(ALLOWED))
-
-
 def check_config() -> None:
     missing = [k for k in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID") if not os.getenv(k)]
     if not llm.providers():
@@ -240,8 +233,6 @@ def check_config() -> None:
         log.warning("Only one AI provider is set; add another key so Pluto has a fallback.")
     if not stt.providers():
         log.warning("No speech-to-text key (%s): voice notes won't work, text will.", stt.KEY_NAMES)
-    if os.getenv("PLUTO_LOG_SHEET_ID") and not sheets.configured():
-        log.warning("PLUTO_LOG_SHEET_ID is set but there is no Google key, so the item log is off.")
 
 
 def build_app() -> Application:
@@ -261,10 +252,6 @@ def build_app() -> Application:
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(nudge_job, interval=NUDGE_EVERY_SECONDS, first=5)
     app.job_queue.run_repeating(digest_job, interval=NUDGE_EVERY_SECONDS, first=10)
-    if sheets.log_enabled():
-        db.on_change = sheets.mark_dirty
-        sheets.mark_dirty()  # catch up on anything that changed while the bot was off
-        app.job_queue.run_repeating(sheet_job, interval=SHEET_EVERY_SECONDS, first=20)
     return app
 
 
@@ -276,8 +263,7 @@ KEY_REPORT = [
     ("ZAI_API_KEY", "Z AI", "AI"),
     ("NVIDIA_API_KEY", "NVIDIA Nemotron", "AI"),
     ("SARVAM_API_KEY", "Sarvam (voice backup)", "optional"),
-    ("GOOGLE_SERVICE_ACCOUNT_FILE", "Google Sheets key file", "optional"),
-    ("PLUTO_LOG_SHEET_ID", "Google Sheet for the item log", "optional"),
+    ("GOOGLE_SERVICE_ACCOUNT_FILE", "Google service account key file (path)", "optional"),
 ]
 
 
@@ -291,7 +277,7 @@ def key_report() -> str:
     lines.append(f"AI order: {llm.describe()}")
     voice = " → ".join(stt.providers()) or f"✗ none (add {stt.KEY_NAMES})"
     lines.append(f"Voice notes: {voice}")
-    lines.extend(sheets.status())
+    lines.extend(sheet_reader.status())
     if not llm.providers():
         lines.append("✗ Set at least one AI key.")
     return "\n".join(lines)

@@ -18,7 +18,7 @@ from datetime import datetime
 
 import httpx
 
-import sheets
+import sheet_reader
 
 log = logging.getLogger("pluto")
 
@@ -286,7 +286,7 @@ GOOGLE SHEETS
 
 def system_prompt() -> str:
     """The instructions for this run: the Sheets section only if Pluto can actually read sheets."""
-    return SYSTEM + SHEETS_PROMPT if sheets.reading_enabled() else SYSTEM
+    return SYSTEM + SHEETS_PROMPT if sheet_reader.reading_enabled() else SYSTEM
 
 
 def _convo(msgs) -> str:
