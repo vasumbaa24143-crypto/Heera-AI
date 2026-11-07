@@ -26,7 +26,9 @@ def fresh_db(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def no_google(monkeypatch):
     """No test sees the developer's real Google settings or can sign in to Google."""
-    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+    for k in ("GOOGLE_SERVICE_ACCOUNT_FILE", "GOOGLE_SHEETS_ID",
+              "GOOGLE_APPS_SCRIPT_URL", "GOOGLE_APPS_SCRIPT_SECRET"):
+        monkeypatch.delenv(k, raising=False)
 
     def no_sign_in():
         raise AssertionError("a test tried to sign in to Google")
@@ -47,9 +49,10 @@ class FakeLLM:
     def choices(self):
         return self._choices
 
-    def respond(self, message, history, items, now_local, prefer=None, related=()):
+    def respond(self, message, history, items, now_local, prefer=None, related=(), summary=""):
         self.calls.append({"message": message, "history": list(history), "items": list(items),
-                           "now": now_local, "prefer": prefer, "related": list(related)})
+                           "now": now_local, "prefer": prefer, "related": list(related),
+                           "summary": summary})
         r = self._result
         if isinstance(r, Exception):
             raise r

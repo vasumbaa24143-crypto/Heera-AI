@@ -15,3 +15,8 @@ google-key*.json
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Google service account keys, if one is ever placed here by mistake
+service-account*.json
+*-key.json
+*credentials*.json

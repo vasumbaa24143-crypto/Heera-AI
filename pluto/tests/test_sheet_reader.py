@@ -14,6 +14,7 @@ import core
 import db
 import llm
 import sheet_reader
+import sheets
 from conftest import NOW, REAL_TOKEN, FakeLLM, says
 
 UID = 7
@@ -89,6 +90,18 @@ def test_a_key_file_turns_reading_on(key):
     assert sheet_reader.reading_enabled() and sheet_reader.account_email() == EMAIL
 
 
+def test_reading_works_alongside_either_dashboard_setup(key, monkeypatch):
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_URL", "https://script.google.com/macros/s/AKfycbxabc/exec")
+    monkeypatch.setenv("GOOGLE_APPS_SCRIPT_SECRET", "s" * 20)
+    assert (sheets.mode(), sheets.problem()) == ("apps_script", "")
+    assert sheet_reader.reading_enabled() and sheet_reader.account_email() == EMAIL
+    monkeypatch.delenv("GOOGLE_APPS_SCRIPT_URL")
+    monkeypatch.setenv("GOOGLE_SHEETS_ID", SID)
+    assert (sheets.mode(), sheets.problem()) == ("service_account", "")
+    # the dashboard and reading agree on which address to share sheets with
+    assert sheet_reader.account_email() == sheets.service_account_email() == EMAIL
+
+
 def test_status_shows_the_email_and_nothing_secret(key):
     text = "\n".join(sheet_reader.status())
     assert f"Share the sheets you want read with {EMAIL}" in text
@@ -114,6 +127,7 @@ def test_a_malformed_private_key_is_reported(key, monkeypatch):
 
 def test_pluto_asks_google_for_read_only_access(key, monkeypatch):
     from google.oauth2 import service_account
+    monkeypatch.setenv("GOOGLE_SHEETS_ID", SID)  # even with the dashboard set up on the same key
     asked = {}
 
     class FakeCredentials:
@@ -127,7 +141,7 @@ def test_pluto_asks_google_for_read_only_access(key, monkeypatch):
     monkeypatch.setattr(service_account, "Credentials", FakeCredentials)
     monkeypatch.setattr(sheet_reader, "_token", REAL_TOKEN)
     assert sheet_reader._token() == "tok"
-    # the same key may also keep the dashboard up to date, but reading never gets write access
+    # the dashboard needs write access to its own sheet; reading never does
     assert asked["scopes"] == ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 
@@ -255,6 +269,15 @@ def test_the_second_ask_says_the_sheet_has_already_been_read(google):
     assistant = asks_to_read()
     core.chat(UID, f"total? {URL}", assistant, NOW)
     assert assistant.calls[1]["message"].endswith("Don't ask to read it again.)")
+
+
+def test_both_asks_get_the_summary_of_older_chat(google):
+    google.rows = [["x"]]
+    db.add_summary(UID, 1, 5, "- Rahul is a colleague", now=NOW)
+    assistant = asks_to_read()
+    core.chat(UID, f"total? {URL}", assistant, NOW)
+    first, second = assistant.calls
+    assert first["summary"] == second["summary"] == "- Rahul is a colleague"
 
 
 def test_no_answer_after_reading_gets_an_honest_reply_not_a_blank(google):

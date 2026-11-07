@@ -298,7 +298,12 @@ Its prompt is `nanobot/templates/agent/consolidator_archive.md`. In short:
 > matching older items and 10 matching older messages). Changes from this design: the "never
 > cite an unknown id" check now looks ids up in the database (so citing a real old item found
 > by search is fine), and search terms use prefix matching ("birthday" finds "birthdays").
-> Rolling summaries and profile facts are still to do.
+> **Rolling summaries: built** (`summaries` table, `core.update_summary`, `llm.summarise`,
+> `bot.summary_job`, `/summary`). Differences from the design: a summary covers only messages
+> that have left the 30-message recent window, in batches of 20–100 (no separate idle trigger:
+> messages only leave the window when new ones arrive); the AI returns JSON lines rather than
+> free text, cleaned and capped in code; `/delete` of an item that came from chat discards the
+> summary so it is rebuilt without that text. Profile facts are still to do.
 
 **When it's needed:** each message currently sends up to 300 open + 50 closed items and the last
 100 messages. That's fine for months of use. It becomes slow and costly when there are more than
