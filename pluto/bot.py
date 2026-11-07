@@ -27,6 +27,7 @@ from telegram.ext import (  # noqa: E402
 import core  # noqa: E402
 import db  # noqa: E402
 import llm  # noqa: E402
+import sheet_reader  # noqa: E402
 import sheets  # noqa: E402
 import stt  # noqa: E402
 
@@ -326,12 +327,13 @@ def key_report() -> str:
     for name, what, kind in KEY_REPORT:
         val = os.getenv(name) or (os.getenv("Z_AI_API_KEY") if name == "ZAI_API_KEY" else None)
         mark = "✓ set    " if val else ("✗ MISSING" if kind == "required" else "– not set")
-        lines.append(f"  {mark}  {name:<20} {what}" + ("  (required)" if kind == "required" else ""))
+        lines.append(f"  {mark}  {name:<28} {what}" + ("  (required)" if kind == "required" else ""))
     lines.append(f"AI order: {llm.describe()}")
     voice = " → ".join(stt.providers()) or f"✗ none (add {stt.KEY_NAMES})"
     lines.append(f"Voice notes: {voice}")
     how = {"apps_script": "Apps Script", "service_account": "service account"}.get(sheets.mode(), "")
     lines.append(f"Google Sheet: {f'✓ via {how}' if not sheets.problem() else sheets.problem()}")
+    lines.extend(sheet_reader.status())
     if not llm.providers():
         lines.append("✗ Set at least one AI key.")
     return "\n".join(lines)

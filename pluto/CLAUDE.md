@@ -13,14 +13,16 @@ nudges until things are done. Read README.md for setup and behaviour.
    dates are derived data; the user's own words are the source of truth. If a message
    is split into several items, each keeps the whole message; if an item came from a
    follow-up ("remind me to call Rahul" → "kal 5 baje"), it keeps both messages.
-2. **Never invent a memory.** Answers come only from the user's saved items and their
-   conversation with Pluto. If nothing matches, say so plainly. The assistant must never
+2. **Never invent a memory.** Answers come only from the user's saved items, their
+   conversation with Pluto and a Google Sheet they sent a link to. If nothing matches,
+   say so plainly. The assistant must never
    invent a deadline or a priority the user did not give or clearly imply. In code, a
    reply that cites an item id the user does not have is withheld (`core.chat`).
 3. **Ask before any outside action.** Pluto only ever messages its own user. It must not
    contact other people, post, buy, or call outside services beyond the AI providers
-   (Gemini, Groq, Z AI, NVIDIA), transcription (Sarvam) and the Google Sheet dashboard the
-   user set up themselves (Google Sheets API) without the user saying yes first. The same goes for
+   (Gemini, Groq, Z AI, NVIDIA), transcription (Sarvam), the Google Sheet dashboard the user set
+   up themselves (Google Sheets API) and reading a Google Sheet the user sent a link to (read
+   only, see `sheet_reader.py`) without the user saying yes first. The same goes for
    anyone working on this repo: ask before pushing, deploying, creating repos, or
    sending anything to an external service.
 4. **Keys only in `.env`.** API keys and tokens live in `.env` (local) or the host's
@@ -57,11 +59,20 @@ background with every message. It never replaces `messages.text`; `/forget` dele
 deleting an item whose words came from chat deletes it so it's rebuilt without them;
 on failure the old one stays and retries wait 10 min.
 
+Reading a Google Sheet (`sheet_reader.py`) is optional and stays off until
+`GOOGLE_SERVICE_ACCOUNT_FILE` is set. The assistant may ask to read a sheet (`read`), but core
+opens it only if the user sent that link (in this message, or in an earlier message of theirs that
+the assistant was shown); what it reads is data, is never saved, and nothing is ever written back
+(the sign-in asks Google for read-only access). What to save or mark done comes only from the
+first answer, which never saw the sheet (the answer that did only supplies the words), so a
+hostile sheet can't make Pluto save, finish or open anything. The Google key file is a secret like
+the other keys: keep it outside the repo.
+
 ## Layout
 
 - `core.py` — the whole flow (`chat`, commands, buttons, time buckets, nudge
   selection, morning digest). Transport-agnostic and synchronous. Put new behaviour here. The model
-  proposes (`reply`, `save`, `done`); core checks and applies.
+  proposes (`reply`, `save`, `done`, `read`); core checks and applies.
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`. Full-text
   search: external-content FTS5 indexes `items_fts` and `messages_fts`, kept in step by
@@ -70,6 +81,8 @@ on failure the old one stays and retries wait 10 min.
   quoted so user text can't break FTS5 syntax. If FTS5 is missing (`db.HAS_FTS = False`),
   search falls back to `LIKE`. `core.chat` sends open items + recent closed + search hits
   (items and older messages) instead of the whole history.
+- `sheet_reader.py` — reads a Google Sheet the user links (read-only). Every Google call goes
+  through `_get` and `_token`, so tests replace them.
 - `llm.py` — the assistant (`respond`) and its system prompt. Tries Gemini → Groq →
   Z AI → NVIDIA Nemotron until one returns valid JSON (`PLUTO_PROVIDERS` sets the order); if all fail,
   core saves the raw note (rule 5).
@@ -98,5 +111,6 @@ python bot.py --check          # which keys are set in .env (never prints values
 
 - Every rule above has a test; add one when you add behaviour.
 - Tests must not touch the network or real keys. Use `FakeLLM`/`says` and the fakes in
-  `tests/test_bot.py`.
+  `tests/test_bot.py`; `tests/conftest.py` clears the Google settings and blocks Google
+  sign-in, and `tests/test_sheet_reader.py` has a `FakeGoogle`.
 - Python 3.11+ (google-genai requires it).
