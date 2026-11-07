@@ -303,7 +303,15 @@ Its prompt is `nanobot/templates/agent/consolidator_archive.md`. In short:
 > that have left the 30-message recent window, in batches of 20–100 (no separate idle trigger:
 > messages only leave the window when new ones arrive); the AI returns JSON lines rather than
 > free text, cleaned and capped in code; `/delete` of an item that came from chat discards the
-> summary so it is rebuilt without that text. Profile facts are still to do.
+> summary so it is rebuilt without that text.
+>
+> **Profile facts: built** (`facts` table, `core.update_facts`, `llm.consolidate`, `bot.facts_job`,
+> `/facts`). Differences from the design: the run is once per local day after 03:30, catching up
+> later that day if the bot was off, and makes no AI call when nothing is new; the model can
+> also `retire` a fact (marked, never deleted); "ephemeral" facts retire after 30 days, as in
+> nanobot's tags; new notes and ideas are passed alongside the summary; `/facts delete` and
+> `/facts clear` let the user remove facts, and `/delete` of an item drops facts that share its
+> key words.
 
 **When it's needed:** each message currently sends up to 300 open + 50 closed items and the last
 100 messages. That's fine for months of use. It becomes slow and costly when there are more than

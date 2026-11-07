@@ -138,7 +138,8 @@ def test_commands(monkeypatch):
     assert texts == [
         f"✅ #{i} Pay rent", f"Snoozed #{i} for a day 😴", f"Done #{i} ✅",
         "Usage: /done <id>", f"Deleted #{i} forever.",
-        "Cleared our chat history (0 messages). Your saved items are untouched.",
+        "Cleared our chat history (0 messages), its summary and the profile facts "
+        "built from it. Your saved items are untouched.",
     ]
     [(raw, name)] = u.message.documents
     assert name == "pluto-export.json"
@@ -254,7 +255,7 @@ def test_config_accepts_any_one_ai_key(monkeypatch):
 def test_app_builds_with_all_handlers(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST-not-a-real-token")
     app = bot.build_app()
-    assert sum(len(h) for h in app.handlers.values()) == 14
+    assert sum(len(h) for h in app.handlers.values()) == 15
     assert app.job_queue is not None  # needs python-telegram-bot[job-queue]
 
 

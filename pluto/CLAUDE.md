@@ -55,7 +55,14 @@ messages older than the last `HISTORY_TURNS` (30) are folded, at least 20 at a t
 derived summary per user (`summaries` table, ≤15 lines / 1,500 chars). It's sent to the AI as
 background with every message. It never replaces `messages.text`; `/forget` deletes it;
 deleting an item whose words came from chat deletes it so it's rebuilt without them;
-on failure the old one stays and retries wait 10 min.
+on failure the old one stays and retries wait 10 min. Profile facts (`core.update_facts`,
+`llm.consolidate`, `bot.facts_job`, `/facts`): once per local day after 03:30, only when there's
+a new summary or new notes (else no AI call). The model proposes add/update/retire; core accepts
+only this user's active fact ids, cleans text (≤200 chars), skips duplicates, caps at 60.
+Automation never edits or deletes a fact: updates add a row and mark the old one `superseded`,
+retires mark it `retired`; "ephemeral" facts retire after 30 days. Only the user hard-deletes
+(`/facts delete`, `/facts clear`, `/forget`; `/delete <item>` drops facts sharing its key words).
+On failure nothing changes and it retries after 30 min.
 
 ## Layout
 

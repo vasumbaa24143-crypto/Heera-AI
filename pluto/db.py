@@ -94,6 +94,20 @@ def init() -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS summaries_user ON summaries(user_id, id)")
         c.execute(
+            """CREATE TABLE IF NOT EXISTS facts(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                text TEXT NOT NULL,             -- derived; one short atomic fact
+                mark TEXT NOT NULL,             -- permanent | durable | ephemeral
+                source TEXT NOT NULL,           -- e.g. "summary:12", "notes", "update:7"
+                status TEXT NOT NULL DEFAULT 'active',  -- active | superseded | retired
+                superseded_by INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS facts_user ON facts(user_id, status)")
+        c.execute(
             """CREATE TABLE IF NOT EXISTS settings(
                 user_id INTEGER NOT NULL,
                 key TEXT NOT NULL,
@@ -340,9 +354,11 @@ def recent_messages(user_id, limit=100):
 
 
 def forget_messages(user_id) -> int:
-    """Clear the conversation log and its summaries (saved items are kept)."""
+    """Clear the conversation log and everything derived from it: summaries and profile
+    facts (saved items are kept)."""
     with conn() as c:
         c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))
+        c.execute("DELETE FROM facts WHERE user_id=?", (user_id,))
         return c.execute("DELETE FROM messages WHERE user_id=?", (user_id,)).rowcount
 
 
@@ -403,6 +419,93 @@ def unsummarised_messages(user_id, window, limit):
             f"SELECT * FROM messages WHERE {where} ORDER BY id LIMIT ?", (*args, limit)
         ).fetchall()
     return rows, total
+
+
+# ---------- profile facts ----------
+#
+# Short, derived facts about the person (people, preferences, routines, goals), built
+# nightly from the rolling summary and new notes. Automation never edits a fact in place:
+# a correction adds a new row and marks the old one superseded; a fact that's no longer
+# true is marked retired. Only the user (/facts delete, /facts clear, /forget) hard-deletes.
+
+FACT_MARKS = ("permanent", "durable", "ephemeral")
+
+
+def active_facts(user_id):
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM facts WHERE user_id=? AND status='active' ORDER BY id", (user_id,)
+        ).fetchall()
+
+
+def add_fact(user_id, text, mark, source, now=None) -> int:
+    now_s = to_str(now or now_utc())
+    with conn() as c:
+        return c.execute(
+            "INSERT INTO facts(user_id, text, mark, source, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (user_id, text, mark if mark in FACT_MARKS else "durable", source, now_s, now_s),
+        ).lastrowid
+
+
+def retire_fact(user_id, fact_id, now=None, superseded_by=None) -> bool:
+    status = "superseded" if superseded_by else "retired"
+    with conn() as c:
+        return c.execute(
+            "UPDATE facts SET status=?, superseded_by=?, updated_at=?"
+            " WHERE id=? AND user_id=? AND status='active'",
+            (status, superseded_by, to_str(now or now_utc()), fact_id, user_id),
+        ).rowcount > 0
+
+
+def delete_fact(user_id, fact_id) -> bool:
+    with conn() as c:
+        return c.execute(
+            "DELETE FROM facts WHERE id=? AND user_id=?", (fact_id, user_id)
+        ).rowcount > 0
+
+
+def delete_facts(user_id) -> int:
+    with conn() as c:
+        return c.execute("DELETE FROM facts WHERE user_id=?", (user_id,)).rowcount
+
+
+def delete_facts_mentioning(user_id, text) -> int:
+    """Hard-delete facts (any status) that share the key words of `text`: at least two of
+    them, or the only one if `text` has just one. Used when the user deletes an item."""
+    terms = set(search_terms(text)[:8])
+    if not terms:
+        return 0
+    need = min(2, len(terms))
+    with conn() as c:
+        rows = c.execute("SELECT id, text FROM facts WHERE user_id=?", (user_id,)).fetchall()
+        doomed = [r["id"] for r in rows if len(terms & set(search_terms(r["text"]))) >= need]
+        for fid in doomed:
+            c.execute("DELETE FROM facts WHERE id=? AND user_id=?", (fid, user_id))
+    return len(doomed)
+
+
+def notes_since(user_id, after_id, limit=50):
+    """Notes and ideas saved after item id `after_id` (oldest first), for the nightly facts."""
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE user_id=? AND id>? AND kind IN ('note','idea')"
+            " ORDER BY id LIMIT ?",
+            (user_id, after_id, limit),
+        ).fetchall()
+
+
+def max_item_id(user_id) -> int:
+    with conn() as c:
+        return c.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM items WHERE user_id=?", (user_id,)
+        ).fetchone()[0]
+
+
+def export_facts(user_id):
+    with conn() as c:
+        rows = c.execute("SELECT * FROM facts WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 def export_summaries(user_id):

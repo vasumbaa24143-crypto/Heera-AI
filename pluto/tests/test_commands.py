@@ -77,7 +77,8 @@ def test_forget_clears_chat_but_keeps_items():
     db.add_message(UID, "user", "hello", now=NOW)
     db.add_message(OTHER, "user", "theirs", now=NOW)
     assert core.cmd_forget(UID).text == (
-        "Cleared our chat history (1 messages). Your saved items are untouched.")
+        "Cleared our chat history (1 messages), its summary and the profile facts "
+        "built from it. Your saved items are untouched.")
     assert db.recent_messages(UID) == []
     assert [m["text"] for m in db.recent_messages(OTHER)] == ["theirs"]
     assert db.get_item(UID, i) is not None
