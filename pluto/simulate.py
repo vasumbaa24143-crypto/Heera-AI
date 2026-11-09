@@ -30,6 +30,7 @@ something; ask "what's on my plate today?" or "what have we discussed about X?".
 /delete <id>       remove forever
 /model [name]      choose which AI thinks first (buttons, or e.g. /model groq)
 /summary           what Pluto remembers from older chats
+/facts [delete N|clear]  what Pluto knows about you (updated nightly after 03:30)
 /forget            clear the chat history and summary (items are kept)
 /export            print everything as JSON
 /tap <data>        press a button, e.g. /tap done:3
@@ -69,6 +70,8 @@ class Session:
             return render([core.cmd_delete(self.uid, arg)])
         if cmd == "/model":
             return render([core.cmd_model(self.uid, self.llm, arg)])
+        if cmd == "/facts":
+            return render([core.cmd_facts(self.uid, arg)])
         if cmd == "/summary":
             return render([core.cmd_summary(self.uid)])
         if cmd == "/digest":
@@ -84,6 +87,9 @@ class Session:
             out = []
             if core.update_summary(self.uid, self.llm, now):
                 out.append("(older chat folded into the summary — see /summary)")
+            done = core.update_facts(self.uid, self.llm, now)
+            if done and any(done.values()):
+                out.append(f"(profile facts updated: {done} — see /facts)")
             for uid, reply, to_mark in core.due_digests([self.uid], now):
                 if reply is not None:
                     out += render([reply])

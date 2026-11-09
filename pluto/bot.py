@@ -253,6 +253,21 @@ async def cmd_sheet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(reply.text, disable_web_page_preview=True)
 
 
+async def facts_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The nightly profile-facts run (once a day after 03:30; usually a quick no-op)."""
+    for uid in digest_users():
+        try:
+            await asyncio.to_thread(core.update_facts, uid, llm)
+        except Exception:
+            log.exception("facts job failed for user %s", uid)
+
+
+async def cmd_facts(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(update.message, [core.cmd_facts(update.effective_user.id, " ".join(ctx.args or []))])
+
+
 async def summary_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Fold chat that has left the recent window into the rolling summary (in a worker
     thread, since it may call the AI). Usually a quick no-op."""
@@ -292,6 +307,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("digest", cmd_digest))
     app.add_handler(CommandHandler("summary", cmd_summary))
+    app.add_handler(CommandHandler("facts", cmd_facts))
     app.add_handler(CommandHandler("sheet", cmd_sheet))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CallbackQueryHandler(on_button))
@@ -301,6 +317,7 @@ def build_app() -> Application:
     app.job_queue.run_repeating(nudge_job, interval=NUDGE_EVERY_SECONDS, first=5)
     app.job_queue.run_repeating(digest_job, interval=NUDGE_EVERY_SECONDS, first=10)
     app.job_queue.run_repeating(summary_job, interval=NUDGE_EVERY_SECONDS, first=30)
+    app.job_queue.run_repeating(facts_job, interval=NUDGE_EVERY_SECONDS, first=40)
     app.job_queue.run_repeating(sheet_job, interval=SHEET_EVERY_SECONDS, first=20)
     return app
 

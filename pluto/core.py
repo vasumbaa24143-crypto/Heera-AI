@@ -18,6 +18,7 @@ that cites an item the user does not have is withheld.
 `llm` is any object with
 respond(message, history, items, now_local, prefer=None, related=(), summary="") -> dict,
 and (for rolling summaries) summarise(previous, messages, now_local, prefer=None) -> list,
+and (for profile facts) consolidate(facts, summary, notes, now_local, prefer=None) -> dict,
 and choices() -> [(name, label)] for the /model menu.
 (llm.py talks to Gemini; offline.py and the tests provide stand-ins.)
 """
@@ -61,6 +62,7 @@ START_TEXT = (
     "/delete <id>  remove forever · /forget  clear our chat history\n"
     "/model  choose which AI thinks first\n"
     "/summary  what I remember from older chats\n"
+    "/facts  what I know about you (people, preferences)\n"
     "/sheet  your Google Sheet dashboard\n"
     "/digest  morning digest (on at 08:30; /digest now to preview)\n"
     "/export  download everything"
@@ -232,7 +234,7 @@ def chat(uid, text, llm, now=None) -> list:
         result = _normalize(
             llm.respond(text, history_views(history), item_views(rows, now), to_local(now),
                         prefer=db.get_setting(uid, "model"), related=history_views(related),
-                        summary=current_summary(uid))
+                        summary=current_summary(uid), facts=profile_text(uid))
         )
     except Exception:
         # Never lose a thought: if the assistant fails, keep the message as a note.
@@ -318,12 +320,19 @@ def cmd_delete(uid, arg) -> Reply:
     i = parse_id(arg)
     if i is None:
         return Reply("Usage: /delete <id>")
-    return Reply(f"Deleted #{i} forever." if db.delete_item(uid, i) else f"I can't find #{i}.")
+    row = db.get_item(uid, i)
+    if row is None or not db.delete_item(uid, i):
+        return Reply(f"I can't find #{i}.")
+    # Profile facts may have been built from it: drop the ones that mention it.
+    n = db.delete_facts_mentioning(uid, f"{row['title']} {row['original_text']}")
+    extra = f" Also forgot {n} profile fact{'s' if n != 1 else ''} about it." if n else ""
+    return Reply(f"Deleted #{i} forever.{extra}")
 
 
 def cmd_forget(uid) -> Reply:
     n = db.forget_messages(uid)
-    return Reply(f"Cleared our chat history ({n} messages). Your saved items are untouched.")
+    return Reply(f"Cleared our chat history ({n} messages), its summary and the profile facts "
+                 "built from it. Your saved items are untouched.")
 
 
 def cmd_model(uid, llm, arg=None) -> Reply:
@@ -366,7 +375,7 @@ def choose_model(uid, llm, name) -> Reply:
 def export_json(uid) -> str:
     return json.dumps(
         {"items": db.export_all(uid), "messages": db.export_messages(uid),
-         "summaries": db.export_summaries(uid)},
+         "summaries": db.export_summaries(uid), "facts": db.export_facts(uid)},
         ensure_ascii=False,
         indent=2,
     )
@@ -754,3 +763,146 @@ def cmd_sheet(uid, problem, link, robot_email="") -> Reply:
             lines.append(f"Share the sheet with {robot_email} as Editor, then send /sheet now.")
     lines.append("/sheet now to update it right away.")
     return Reply("\n".join(lines))
+
+
+
+# ---------- nightly profile facts ----------
+
+FACTS_TIME = (3, 30)                     # local time after which the daily run happens
+FACTS_MAX = 60                           # active facts kept
+FACT_MAX_CHARS = 200
+FACTS_EPHEMERAL_DAYS = 30                # "ephemeral" facts retire on their own after this
+FACTS_RETRY = timedelta(minutes=30)
+FACTS_NOTES_MAX = 50                     # new notes considered per run
+
+
+def profile_text(uid) -> str:
+    return "\n".join(f"- {f['text']}" for f in db.active_facts(uid))
+
+
+def _clean_fact(text):
+    if not isinstance(text, str):
+        return ""
+    return " ".join(text.split()).lstrip("-• ").strip()[:FACT_MAX_CHARS]
+
+
+def _expire_ephemeral(uid, now) -> int:
+    cutoff = db.to_str(now - timedelta(days=FACTS_EPHEMERAL_DAYS))
+    n = 0
+    for f in db.active_facts(uid):
+        if f["mark"] == "ephemeral" and f["updated_at"] < cutoff:
+            n += db.retire_fact(uid, f["id"], now)
+    return n
+
+
+def _apply_fact_changes(uid, result, source, now) -> dict:
+    """Validate the model's proposal against this user's active facts and apply it."""
+    if not isinstance(result, dict):
+        raise ValueError("facts answer must be an object")
+    adds, updates, retires = (result.get(k) or [] for k in ("add", "update", "retire"))
+    if not all(isinstance(x, list) for x in (adds, updates, retires)):
+        raise ValueError("add, update and retire must be lists")
+    active = {f["id"]: f for f in db.active_facts(uid)}
+    known = {f["text"].casefold() for f in active.values()}
+    done = {"added": 0, "updated": 0, "retired": 0}
+
+    for fid in retires:
+        fid = parse_id(fid)
+        if fid in active and db.retire_fact(uid, fid, now):
+            known.discard(active.pop(fid)["text"].casefold())
+            done["retired"] += 1
+    for u in updates:
+        if not isinstance(u, dict):
+            continue
+        fid, text = parse_id(u.get("id")), _clean_fact(u.get("text"))
+        if fid not in active or not text or text.casefold() in known:
+            continue
+        mark = u.get("mark") if u.get("mark") in db.FACT_MARKS else active[fid]["mark"]
+        new_id = db.add_fact(uid, text, mark, f"update:{fid}", now)
+        db.retire_fact(uid, fid, now, superseded_by=new_id)
+        known.discard(active.pop(fid)["text"].casefold())
+        known.add(text.casefold())
+        done["updated"] += 1
+    room = FACTS_MAX - len(db.active_facts(uid))
+    for a in adds:
+        if room <= 0:
+            log.info("profile is full (%d facts); skipping new ones", FACTS_MAX)
+            break
+        text = _clean_fact(a.get("text") if isinstance(a, dict) else None)
+        if not text or text.casefold() in known:
+            continue
+        db.add_fact(uid, text, a.get("mark"), source, now)
+        known.add(text.casefold())
+        room -= 1
+        done["added"] += 1
+    return done
+
+
+def update_facts(uid, llm, now=None, force=False):
+    """The nightly profile run. Once per local day, after FACTS_TIME (or straight away with
+    force=True), fold the latest summary and newly saved notes into the profile facts. Makes
+    no AI call when nothing is new. On failure nothing changes and it retries after
+    FACTS_RETRY. Returns the counts applied, or None if it didn't run."""
+    now = now or db.now_utc()
+    if not hasattr(llm, "consolidate"):
+        return None
+    _expire_ephemeral(uid, now)
+    local = to_local(now)
+    today = local.date().isoformat()
+    if not force:
+        if (local.hour, local.minute) < FACTS_TIME or db.get_setting(uid, "facts_last_date") == today:
+            return None
+        retry_after = db.get_setting(uid, "facts_retry_after")
+        if retry_after and db.to_str(now) < retry_after:
+            return None
+
+    summary = db.latest_summary(uid)
+    new_summary = summary is not None and summary["id"] > int(db.get_setting(uid, "facts_summary_id", "0"))
+    notes = db.notes_since(uid, int(db.get_setting(uid, "facts_item_id", "0")), FACTS_NOTES_MAX)
+    if not new_summary and not notes:
+        db.set_setting(uid, "facts_last_date", today)
+        return None
+
+    facts = [{"id": f["id"], "mark": f["mark"], "text": f["text"]} for f in db.active_facts(uid)]
+    note_views = [{"kind": n["kind"], "title": n["title"], "original_text": n["original_text"]} for n in notes]
+    try:
+        result = llm.consolidate(facts, summary["text"] if new_summary else "", note_views, local,
+                                 prefer=db.get_setting(uid, "model"))
+        source = f"summary:{summary['id']}" if new_summary else "notes"
+        done = _apply_fact_changes(uid, result, source, now)
+    except Exception:
+        log.exception("profile facts update failed; nothing changed")
+        db.set_setting(uid, "facts_retry_after", db.to_str(now + FACTS_RETRY))
+        return None
+    if summary is not None:
+        db.set_setting(uid, "facts_summary_id", str(summary["id"]))
+    if notes:
+        db.set_setting(uid, "facts_item_id", str(notes[-1]["id"]))
+    db.set_setting(uid, "facts_last_date", today)
+    db.set_setting(uid, "facts_retry_after", "")
+    return done
+
+
+def cmd_facts(uid, arg=None) -> Reply:
+    """/facts             what Pluto knows about you
+    /facts delete 3    forget one fact
+    /facts clear       forget them all"""
+    arg = (arg or "").strip().lower()
+    if arg == "clear":
+        n = db.delete_facts(uid)
+        return Reply(f"Forgot all {n} profile facts. Your saved items and chat are untouched.")
+    if arg.startswith(("delete", "del", "forget")):
+        fid = parse_id(arg.split(maxsplit=1)[1] if " " in arg else "")
+        if fid is None:
+            return Reply("Usage: /facts delete <number>")
+        return Reply(f"Forgot fact {fid}." if db.delete_fact(uid, fid) else f"I can't find fact {fid}.")
+    if arg:
+        return Reply("Usage: /facts, /facts delete <number>, or /facts clear")
+    facts = db.active_facts(uid)
+    if not facts:
+        return Reply("I don't have any profile facts about you yet. Each night I go over our "
+                     "older chats and your notes and keep a few lasting ones (people, "
+                     "preferences, routines) here.")
+    lines = [f"{f['id']}. {f['text']}" for f in facts]
+    return Reply(_short("🪪 What I know about you:\n" + "\n".join(lines) +
+                        "\n\n/facts delete <number> to remove one · /facts clear to remove all"))
