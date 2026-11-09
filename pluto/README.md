@@ -23,7 +23,7 @@ You need Python 3.11 or newer.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # then fill in the values
+cp .env.example pluto.env # then fill in the values
 python bot.py --check     # shows which keys are set (never their values)
 python bot.py
 ```
@@ -37,7 +37,7 @@ python bot.py
 
 ```bash
 python simulate.py --offline   # no keys, no network: simple built-in assistant
-python simulate.py             # same, but with your AI keys from .env
+python simulate.py             # same, but with your AI keys from pluto.env
 ```
 
 It runs the same flow as the bot (`core.py`) with its own `simulate.db`. Buttons appear as
@@ -167,11 +167,11 @@ anywhere else. When done, tell me the sheet's link and how many rows each tab ha
 
 See `CLAUDE.md`. In short: your original message is stored untouched; if labelling fails it is still
 saved as a plain note; recall answers only from saved items; only `ALLOWED_USER_ID` can use the bot;
-keys live only in `.env`.
+keys live only in `pluto.env`.
 
 ## Deploy (later)
 
-`Procfile` has `worker: python bot.py` for Railway. Add the `.env` values as Railway variables,
+`Procfile` has `worker: python bot.py` for Railway. Add the `pluto.env` values as Railway variables,
 and mount a volume for the database (set `PLUTO_DB` to a path on the volume, e.g. `/data/pluto.db`).
 The bot must be running to nudge.
 

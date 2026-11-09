@@ -60,7 +60,7 @@ def test_offline_or_no_keys_has_nothing_to_choose():
 
 
 def test_real_llm_preference_moves_provider_first(monkeypatch):
-    for k in ("PLUTO_PROVIDERS", "Z_AI_API_KEY"):
+    for k in ("PLUTO_PROVIDERS", "Z_AI_API_KEY", "NVIDIA_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     for k in ("GEMINI_API_KEY", "GROQ_API_KEY", "ZAI_API_KEY"):
         monkeypatch.setenv(k, "x")

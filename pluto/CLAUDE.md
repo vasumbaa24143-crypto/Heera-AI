@@ -23,9 +23,10 @@ nudges until things are done. Read README.md for setup and behaviour.
    user set up themselves (Google Sheets API) without the user saying yes first. The same goes for
    anyone working on this repo: ask before pushing, deploying, creating repos, or
    sending anything to an external service.
-4. **Keys only in `.env`.** API keys and tokens live in `.env` (local) or the host's
-   environment variables (Railway). Never hard-code them, log them, put them in tests,
-   or commit `.env`. `.env.example` lists the names with empty values; add any new
+4. **Keys only in `pluto.env`.** API keys and tokens live in `pluto.env` (local; `.env`
+   is read only if it is missing; see `envfile.py`) or the host's environment variables
+   (Railway). Never hard-code them, log them, put them in tests, or commit `pluto.env`
+   or `.env`. `.env.example` lists the names with empty values; add any new
    key there and to `bot.KEY_REPORT` (a test checks they match).
 5. **If labelling fails, save it as a plain note.** Any error or malformed output from
    the assistant means: store the message as a `note` with the original text and tell
@@ -100,7 +101,7 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest                         # must pass before every commit
 python simulate.py --offline   # try the flow in the terminal, no keys needed
-python bot.py --check          # which keys are set in .env (never prints values)
+python bot.py --check          # which keys are set in pluto.env (never prints values)
 ```
 
 - Every rule above has a test; add one when you add behaviour.

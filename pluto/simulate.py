@@ -1,7 +1,7 @@
 """Chat with Pluto in the terminal: the same flow as the Telegram bot (core.py),
 without Telegram.
 
-    python simulate.py              # uses your AI keys from .env (Gemini, Groq, Z AI, NVIDIA)
+    python simulate.py              # uses your AI keys from pluto.env (Gemini, Groq, Z AI, NVIDIA)
     python simulate.py --offline    # simple built-in assistant, no network, no keys
 
 It uses its own database (simulate.db) so it never touches the bot's pluto.db.
@@ -14,9 +14,9 @@ import re
 import sys
 from datetime import timedelta
 
-from dotenv import load_dotenv
+import envfile
 
-load_dotenv()
+envfile.load()
 
 import core  # noqa: E402
 import db  # noqa: E402
@@ -137,7 +137,7 @@ def main(argv=None) -> None:
         import llm
 
         if not llm.providers():
-            sys.exit(f"No AI key in .env ({llm.KEY_NAMES}). "
+            sys.exit(f"No AI key in pluto.env ({llm.KEY_NAMES}). "
                      "Fill one in, or run: python simulate.py --offline")
 
     db.DB_PATH = args.db
