@@ -70,6 +70,8 @@ On failure nothing changes and it retries after 30 min.
   selection, morning digest). Transport-agnostic and synchronous. Put new behaviour here. The model
   proposes (`reply`, `save`, `done`); core checks and applies.
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
+  `watchdog.py` — exits the bot after 5 minutes without any answer from Telegram's
+  long poll, so the supervisor (launchd, Railway) restarts it.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`. Full-text
   search: external-content FTS5 indexes `items_fts` and `messages_fts`, kept in step by
   triggers (so `/delete` and `/forget` also clear search), `unicode61` without Porter

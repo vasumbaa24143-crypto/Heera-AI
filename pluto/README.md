@@ -175,6 +175,12 @@ keys live only in `.env`.
 and mount a volume for the database (set `PLUTO_DB` to a path on the volume, e.g. `/data/pluto.db`).
 The bot must be running to nudge.
 
+If Telegram stops answering for 5 minutes (the network dropped and polling hung, as
+happened once), the bot logs `No answer from Telegram` and exits on purpose, so whatever
+runs it can start it again: Railway's restart policy, or on a Mac a launchd login item
+with `KeepAlive`. Messages sent meanwhile wait at Telegram (up to 24 hours) and arrive
+after the restart. Run by hand, it simply stops; start it again.
+
 ## Known limits
 
 - **Search:** each message sends the AI your open items (the 150 most urgent), the 20 most recently finished, and the last 30 chat messages. On top of that, it sends up to 10 older items and 10 older messages that contain the same words, found with SQLite's built-in full-text search (FTS5). So "what did we discuss about Goa?" reaches back to your very first message, while each message stays small. Search matches **words, not meaning**: "beach holiday" won't find "Goa trip", and Hindi in Devanagari won't match the same word typed in Latin letters. If your Python's SQLite lacks FTS5, Pluto falls back to a slower plain-text search.

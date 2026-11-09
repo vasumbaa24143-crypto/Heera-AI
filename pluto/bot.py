@@ -15,6 +15,7 @@ load_dotenv()
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
 from telegram.error import BadRequest  # noqa: E402
+from telegram.request import HTTPXRequest  # noqa: E402
 from telegram.ext import (  # noqa: E402
     Application,
     CallbackQueryHandler,
@@ -29,6 +30,7 @@ import db  # noqa: E402
 import llm  # noqa: E402
 import sheets  # noqa: E402
 import stt  # noqa: E402
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO lines include the bot token
@@ -296,8 +298,25 @@ def check_config() -> None:
         log.warning("Google Sheet dashboard: %s", sheets.problem())
 
 
-def build_app() -> Application:
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+class PollingRequest(HTTPXRequest):
+    """The connection that asks Telegram for new messages. Every answer, even an empty
+    one or an error status, tells the watchdog that polling is alive."""
+
+    def __init__(self, dog: watchdog.Watchdog):
+        super().__init__(connection_pool_size=1)  # what python-telegram-bot uses for polling
+        self.dog = dog
+
+    async def do_request(self, *args, **kwargs):
+        answer = await super().do_request(*args, **kwargs)
+        self.dog.beat()
+        return answer
+
+
+def build_app(dog: watchdog.Watchdog | None = None) -> Application:
+    builder = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"])
+    if dog is not None:
+        builder = builder.get_updates_request(PollingRequest(dog))
+    app = builder.build()
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("done", cmd_done))
@@ -371,7 +390,9 @@ def main() -> None:
         return
     check_config()
     db.init()
-    app = build_app()
+    dog = watchdog.Watchdog()
+    app = build_app(dog)
+    dog.start()
     log.info("Pluto is running (AI: %s)", llm.describe())
     app.run_polling()
 
