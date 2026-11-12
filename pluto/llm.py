@@ -262,6 +262,11 @@ MARKING THINGS DONE
 - If the user says they finished something ("Rahul ko deck bhej diya", "paid the rent"), put the id
   in "done" only if it clearly matches exactly one open item, and say so in your reply. If it is
   unclear which item they mean, ask instead.
+- A message may start with "[Replying to: …]": the user tapped Reply on that earlier message
+  (often a reminder ending in "(#id)"). "Done", "ho gaya", "this one" etc. then refer to that
+  message's item, so do not ask which one.
+- Your reminders appear in the conversation as Pluto messages. A short "done" right after one
+  refers to that reminder's item.
 
 Keep replies short: one to four sentences, or a compact list. No markdown headings or tables.
 """

@@ -213,8 +213,11 @@ def _cited_ids(text) -> set:
     return {int(n) for n in re.findall(r"#(\d+)", text)}
 
 
-def chat(uid, text, llm, now=None) -> list:
-    """Handle one free-text message from the user and return Pluto's replies."""
+def chat(uid, text, llm, now=None, replying_to=None) -> list:
+    """Handle one free-text message from the user and return Pluto's replies.
+
+    replying_to is the text of the message the user replied to (e.g. a reminder), if any.
+    The assistant sees it; the stored message stays exactly as the user wrote it."""
     now = now or db.now_utc()
     text = (text or "").strip()
     if not text:
@@ -230,9 +233,13 @@ def chat(uid, text, llm, now=None) -> list:
     related = db.search_messages(uid, text, SEARCH_HITS, before_id=oldest_recent) if history else []
     db.add_message(uid, "user", text, now=now)  # the user's words, kept as said
 
+    message = text
+    quoted = (replying_to or "").strip()
+    if quoted:
+        message = f"[Replying to: {quoted}]\n{text}"
     try:
         result = _normalize(
-            llm.respond(text, history_views(history), item_views(rows, now), to_local(now),
+            llm.respond(message, history_views(history), item_views(rows, now), to_local(now),
                         prefer=db.get_setting(uid, "model"), related=history_views(related),
                         summary=current_summary(uid), facts=profile_text(uid))
         )
@@ -415,7 +422,7 @@ def due_nudges(now=None) -> list:
     A reminder's first alert goes out at the time the user asked for, even in
     quiet hours. Repeats and stale-idea nudges wait for daytime and respect the
     daily cap. The caller sends each one and then calls
-    db.mark_nudged(item_id, user_id, now), so a failed send is retried."""
+    record_nudge(user_id, item_id, reply, now), so a failed send is retried."""
     now = now or db.now_utc()
     out = []
     # With the morning digest on, old ideas come up there (one a day), so they
@@ -435,6 +442,13 @@ def due_nudges(now=None) -> list:
             )
         out.append((r["user_id"], r["id"], reply))
     return out
+
+
+def record_nudge(uid, item_id, reply, now=None) -> None:
+    """After a nudge was sent: count it, and keep it in the chat so a reply like
+    "done already" can be matched to it."""
+    db.mark_nudged(item_id, uid, now)
+    db.add_message(uid, "pluto", reply.text, now=now)
 
 
 # ---------- daily digest ----------
