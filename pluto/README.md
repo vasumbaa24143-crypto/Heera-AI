@@ -33,6 +33,35 @@ python bot.py
    - "remind me kal shaam Rahul ko deck bhejna hai"
    - then ask: "aaj aur kal kya kya hai?" or "YouTube wala idea kya tha?"
 
+## Run it on a Mac in the background
+
+So you don't need a terminal window open:
+
+```bash
+cd ~/Heera-AI/pluto
+./mac/pluto.sh install --awake
+```
+
+This creates the Python environment if needed, installs the requirements, checks your `.env` (and creates it
+from the template the first time, then stops so you can fill it in), and registers Pluto as a background app
+that **starts when you log in and restarts itself if it stops**.
+
+| Command | What it does |
+|---|---|
+| `./mac/pluto.sh status` | Is it running? Shows the last log line. |
+| `./mac/pluto.sh logs` | Follow the log (Ctrl-C to stop watching). |
+| `./mac/pluto.sh restart` | Use after changing `.env` or pulling new code. |
+| `./mac/pluto.sh stop` / `start` | Pause and resume. |
+| `./mac/pluto.sh uninstall` | Remove the background app. Your data, `.env` and logs stay. |
+
+- `--awake` stops the Mac from idle-sleeping while Pluto runs (it uses macOS's own `caffeinate`). Leave it off
+  to let the Mac sleep normally; reminders then wait until it wakes.
+- **Closing the lid still puts a MacBook to sleep**, so reminders pause until you open it. Reminders due while it
+  slept arrive when it wakes, and the morning digest catches up within 4 hours. For truly always-on, deploy it (below).
+- Keep the `Heera-AI` folder in your home folder. macOS restricts background apps inside Documents, Desktop and Downloads.
+- Logs are in `~/Library/Logs/Pluto/pluto.log`. The background job is `~/Library/LaunchAgents/com.heeralal.pluto.plist`.
+- Don't also run `python bot.py` by hand while it's installed: two copies would fight over Telegram.
+
 ## Try it without Telegram
 
 ```bash
