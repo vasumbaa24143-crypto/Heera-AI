@@ -91,6 +91,9 @@ On failure nothing changes and it retries after 30 min.
   cells with `'` (in Python and again in the script). Keys and the script secret live only in
   `.env`; `.gitignore` also blocks common key file names. `python bot.py --dashboard-json`
   prints the same tabs as JSON for updating a sheet through Claude (README, option C).
+- `mac/` — run as a macOS background app: `pluto.sh` (install/status/logs/restart/stop/uninstall,
+  bash 3.2 compatible) registers a launchd agent written by `make_plist.py` (RunAtLoad,
+  KeepAlive, optional `caffeinate -i`). It never reads `.env`; it only sets it to mode 600.
 - `tests/` — pytest with a fake assistant and fake Telegram objects; no network needed.
 
 ## Working on it
