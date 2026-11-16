@@ -64,9 +64,9 @@ def mode() -> str:
         return "service_account"
     if script_url():
         return "apps_script"
-    if sheet_id() or key_file():
+    if sheet_id():
         return "service_account"  # half set up: problem() explains what's missing
-    return ""
+    return ""  # a key file alone may be there for the Google Doc notebook
 
 
 def enabled() -> bool:

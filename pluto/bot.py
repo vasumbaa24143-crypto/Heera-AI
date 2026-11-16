@@ -27,6 +27,7 @@ from telegram.ext import (  # noqa: E402
 import core  # noqa: E402
 import db  # noqa: E402
 import llm  # noqa: E402
+import gdoc  # noqa: E402
 import sheets  # noqa: E402
 import stt  # noqa: E402
 
@@ -240,6 +241,30 @@ async def sheet_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning("sheet sync failed for user %s: %s", uid, e)
 
 
+async def doc_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Keep the Google Doc notebook current (only writes when something changed)."""
+    if gdoc.problem():
+        return
+    for uid in digest_users():
+        try:
+            await asyncio.to_thread(core.sync_doc, uid, gdoc.push)
+        except Exception as e:
+            log.warning("doc sync failed for user %s: %s", uid, e)
+
+
+async def cmd_doc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    if _arg(ctx) == "now" and not gdoc.problem():
+        try:
+            await asyncio.to_thread(core.sync_doc, uid, gdoc.push, True)
+        except Exception as e:
+            log.warning("doc sync failed for user %s: %s", uid, e)
+    reply = core.cmd_doc(uid, gdoc.problem(), gdoc.url(), gdoc.service_account_email())
+    await update.message.reply_text(reply.text, disable_web_page_preview=True)
+
+
 async def cmd_sheet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
@@ -294,6 +319,8 @@ def check_config() -> None:
         log.warning("No speech-to-text key (%s): voice notes won't work, text will.", stt.KEY_NAMES)
     if sheets.problem() not in ("", "not set up"):
         log.warning("Google Sheet dashboard: %s", sheets.problem())
+    if gdoc.problem() not in ("", "not set up"):
+        log.warning("Google Doc notebook: %s", gdoc.problem())
 
 
 def build_app() -> Application:
@@ -309,6 +336,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("facts", cmd_facts))
     app.add_handler(CommandHandler("sheet", cmd_sheet))
+    app.add_handler(CommandHandler("doc", cmd_doc))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
@@ -319,6 +347,7 @@ def build_app() -> Application:
     app.job_queue.run_repeating(summary_job, interval=NUDGE_EVERY_SECONDS, first=30)
     app.job_queue.run_repeating(facts_job, interval=NUDGE_EVERY_SECONDS, first=40)
     app.job_queue.run_repeating(sheet_job, interval=SHEET_EVERY_SECONDS, first=20)
+    app.job_queue.run_repeating(doc_job, interval=SHEET_EVERY_SECONDS, first=25)
     return app
 
 
@@ -332,7 +361,10 @@ KEY_REPORT = [
     ("SARVAM_API_KEY", "Sarvam (voice backup)", "optional"),
     ("GOOGLE_APPS_SCRIPT_URL", "Google Sheet via Apps Script (web app link)", "optional"),
     ("GOOGLE_APPS_SCRIPT_SECRET", "Apps Script secret word", "optional"),
+    ("GOOGLE_DOC_APPS_SCRIPT_URL", "Google Doc via Apps Script (web app link)", "optional"),
+    ("GOOGLE_DOC_APPS_SCRIPT_SECRET", "Doc Apps Script secret word", "optional"),
     ("GOOGLE_SHEETS_ID", "Google Sheet via service account (sheet id or URL)", "optional"),
+    ("GOOGLE_DOC_ID", "Google Doc via service account (doc id or URL)", "optional"),
     ("GOOGLE_SERVICE_ACCOUNT_FILE", "Google service account key file (path)", "optional"),
 ]
 
@@ -349,6 +381,8 @@ def key_report() -> str:
     lines.append(f"Voice notes: {voice}")
     how = {"apps_script": "Apps Script", "service_account": "service account"}.get(sheets.mode(), "")
     lines.append(f"Google Sheet: {f'✓ via {how}' if not sheets.problem() else sheets.problem()}")
+    how = {"apps_script": "Apps Script", "service_account": "service account"}.get(gdoc.mode(), "")
+    lines.append(f"Google Doc: {f'✓ via {how}' if not gdoc.problem() else gdoc.problem()}")
     if not llm.providers():
         lines.append("✗ Set at least one AI key.")
     return "\n".join(lines)

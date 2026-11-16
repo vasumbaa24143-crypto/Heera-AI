@@ -83,7 +83,7 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/facts` (what Pluto knows about you; `/facts delete 3`, `/facts clear`) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/forget` (clear chat history, its summary and profile facts) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/facts` (what Pluto knows about you; `/facts delete 3`, `/facts clear`) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/doc` (Google Doc notebook; `/doc now` updates it) · `/forget` (clear chat history, its summary and profile facts) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
 
 ## Morning digest
 
@@ -182,6 +182,36 @@ formula (if a cell starts with = + - or @, keep it as text), and make the first 
 Don't change other tabs, don't modify pluto.db or any other file, and don't send this data
 anywhere else. When done, tell me the sheet's link and how many rows each tab has.
 ```
+
+## Google Doc notebook (optional)
+
+Pluto can also keep a Google Doc up to date, as a readable notebook: **Today** (overdue and due today),
+**Coming up and undated**, **Notes and ideas**, **What I know about you**, **From our older chats**, and
+**Recently finished**. It checks every 5 minutes and writes only when something changed. `/doc` shows the
+link and status; `/doc now` updates it right away.
+
+It's **one-way, and Pluto rewrites the whole doc each time**, so use a doc made just for this and don't
+type your own notes into it. Your items, profile facts and chat summary will be stored in Google once it's on.
+
+**Setup with Apps Script (about 5 minutes, no Google Cloud):**
+
+1. Create a Google Doc ([docs.new](https://docs.new)) and name it e.g. "Pluto notebook".
+2. **Extensions → Apps Script**. Delete what's there and paste the whole of
+   [`apps_script/DocCode.gs`](apps_script/DocCode.gs).
+3. Replace `CHANGE-ME-to-a-long-random-word` with a long random word (at least 16 characters). Use a
+   different word from the Sheet's. Save.
+4. **Deploy → New deployment → Web app**, with *Execute as*: **Me** and *Who has access*: **Anyone**. Then
+   **Deploy** and allow access (**Advanced → Go to (project) → Allow**).
+5. Put the web app URL (it ends in `/exec`) and the word in `.env`:
+   ```
+   GOOGLE_DOC_APPS_SCRIPT_URL=https://script.google.com/macros/s/.../exec
+   GOOGLE_DOC_APPS_SCRIPT_SECRET=<the same word as in the script>
+   ```
+6. `python bot.py --check` should show `Google Doc: ✓ via Apps Script`. Restart the bot and send `/doc now`.
+
+**Or with a service account** (if you set one up for the Sheet): enable the **Google Docs API** in the same
+Google Cloud project, share the doc with the service account's email as **Editor**, and set `GOOGLE_DOC_ID`
+to the doc's URL. It uses the same `GOOGLE_SERVICE_ACCOUNT_FILE`.
 
 ## How reminders and nudges work
 

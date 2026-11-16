@@ -64,6 +64,7 @@ START_TEXT = (
     "/summary  what I remember from older chats\n"
     "/facts  what I know about you (people, preferences)\n"
     "/sheet  your Google Sheet dashboard\n"
+    "/doc  your Google Doc notebook\n"
     "/digest  morning digest (on at 08:30; /digest now to preview)\n"
     "/export  download everything"
 )
@@ -906,3 +907,96 @@ def cmd_facts(uid, arg=None) -> Reply:
     lines = [f"{f['id']}. {f['text']}" for f in facts]
     return Reply(_short("🪪 What I know about you:\n" + "\n".join(lines) +
                         "\n\n/facts delete <number> to remove one · /facts clear to remove all"))
+
+
+
+# ---------- Google Doc notebook (content only; gdoc.py does the Google calls) ----------
+
+DOC_DONE_MAX = 10
+DOC_NOTES_MAX = 200
+
+
+def doc_blocks(uid, now=None) -> list:
+    """The user's notebook as blocks for gdoc.push():
+    [{"style": "title" | "heading" | "text" | "bullet", "text": str}, ...]."""
+    now = now or db.now_utc()
+    t = sheet_tables(uid, now)
+    todos, notes, done = t["To-dos"][1:], t["Notes & ideas"][1:], t["Done"][1:]
+    local = to_local(now)
+    out = [{"style": "title", "text": "Pluto notebook"},
+           {"style": "text", "text": f"Last updated: {local:%a %d %b %Y, %H:%M} ({TZ.key}). "
+                                     "Pluto rewrites this doc; change things in Telegram."}]
+
+    def section(title, lines, empty=None):
+        if not lines and empty is None:
+            return
+        out.append({"style": "heading", "text": title})
+        if not lines:
+            out.append({"style": "text", "text": empty})
+        out.extend({"style": "bullet", "text": ln} for ln in lines)
+
+    def todo_line(r):  # [ID, To-do, Type, Priority, Due, When, Added, Your words]
+        mark = PRIORITY_MARK.get(r[3], "")
+        due = f" — due {r[4]}" if r[4] else ""
+        return f"#{r[0]} {mark}{r[1]}{due}"
+
+    now_rows = [r for r in todos if r[5] in ("overdue", "today")]
+    later = [r for r in todos if r[5] not in ("overdue", "today")]
+    section("Today", [todo_line(r) + (" (overdue)" if r[5] == "overdue" else "") for r in now_rows],
+            empty="Nothing overdue or due today.")
+    section("Coming up and undated", [todo_line(r) for r in later])
+    section("Notes and ideas",       # [ID, Note / idea, Type, Added, Your words]
+            [f"#{r[0]} {KIND_ICON.get(r[2], '')} {r[1]} ({r[3][:10]})" for r in notes[:DOC_NOTES_MAX]])
+    section("What I know about you", [f["text"] for f in db.active_facts(uid)])
+    summary = [ln.lstrip("-• ").strip() for ln in current_summary(uid).splitlines() if ln.strip()]
+    section("From our older chats", summary)
+    section("Recently finished",     # [ID, Item, Type, Status, Finished, Due, Added]
+            [f"#{r[0]} {r[1]} ({r[3]}{', ' + r[4][:10] if r[4] else ''})" for r in done[:DOC_DONE_MAX]])
+    return out
+
+
+def sync_doc(uid, push, force=False, now=None) -> str:
+    """Write this user's notebook with `push(blocks)` (gdoc.push) if anything changed.
+
+    Returns "synced" or "unchanged". On failure, records the error for /doc and re-raises."""
+    import hashlib
+
+    now = now or db.now_utc()
+    blocks = doc_blocks(uid, now)
+    stable = [b for b in blocks if not b["text"].startswith("Last updated:")]
+    fp = hashlib.sha256(json.dumps(stable, ensure_ascii=False).encode()).hexdigest()
+    if not force and db.get_setting(uid, "doc_hash") == fp:
+        return "unchanged"
+    try:
+        link = push(blocks)
+    except Exception as e:
+        db.set_setting(uid, "doc_error", str(e)[:300])
+        raise
+    if isinstance(link, str) and link:
+        db.set_setting(uid, "doc_url", link)
+    db.set_setting(uid, "doc_hash", fp)
+    db.set_setting(uid, "doc_synced_at", db.to_str(now))
+    db.set_setting(uid, "doc_error", "")
+    return "synced"
+
+
+def cmd_doc(uid, problem, link, robot_email="") -> Reply:
+    """/doc: where the notebook is and whether syncing works."""
+    if problem == "not set up":
+        return Reply(
+            "📄 No Google Doc notebook yet. The easiest setup (about 5 minutes) is in the README "
+            "under “Google Doc notebook”: paste Pluto's Apps Script into a new doc, deploy it, and "
+            "add GOOGLE_DOC_APPS_SCRIPT_URL and GOOGLE_DOC_APPS_SCRIPT_SECRET to .env.")
+    if problem:
+        return Reply(f"📄 The Google Doc notebook can't sync: {problem}.")
+    synced = db.get_setting(uid, "doc_synced_at")
+    when = f"{to_local(db.from_str(synced)):%a %d %b, %H:%M}" if synced else "not yet"
+    link = link or db.get_setting(uid, "doc_url", "") or "(the link appears after the first update)"
+    lines = [f"📄 Your notebook: {link}", f"Last updated: {when} (checked every 5 minutes)."]
+    err = db.get_setting(uid, "doc_error")
+    if err:
+        lines.append(f"⚠️ Last attempt failed: {err}")
+        if robot_email and ("403" in err or "permission" in err.lower()):
+            lines.append(f"Share the doc with {robot_email} as Editor, then send /doc now.")
+    lines.append("/doc now to update it right away.")
+    return Reply("\n".join(lines))

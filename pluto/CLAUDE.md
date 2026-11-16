@@ -19,8 +19,8 @@ nudges until things are done. Read README.md for setup and behaviour.
    reply that cites an item id the user does not have is withheld (`core.chat`).
 3. **Ask before any outside action.** Pluto only ever messages its own user. It must not
    contact other people, post, buy, or call outside services beyond the AI providers
-   (Gemini, Groq, Z AI, NVIDIA), transcription (Sarvam) and the Google Sheet dashboard the
-   user set up themselves (Google Sheets API) without the user saying yes first. The same goes for
+   (Gemini, Groq, Z AI, NVIDIA), transcription (Sarvam) and the Google Sheet dashboard or Doc notebook the
+   user set up themselves (Google Sheets/Docs API) without the user saying yes first. The same goes for
    anyone working on this repo: ask before pushing, deploying, creating repos, or
    sending anything to an external service.
 4. **Keys only in `.env`.** API keys and tokens live in `.env` (local) or the host's
@@ -91,6 +91,11 @@ On failure nothing changes and it retries after 30 min.
   cells with `'` (in Python and again in the script). Keys and the script secret live only in
   `.env`; `.gitignore` also blocks common key file names. `python bot.py --dashboard-json`
   prints the same tabs as JSON for updating a sheet through Claude (README, option C).
+- `gdoc.py` — one-way Google Doc notebook, same two connection ways as the sheet
+  (`apps_script/DocCode.gs` with its own secret, or the service account + Docs API).
+  `core.doc_blocks()` builds title/heading/text/bullet blocks; `core.sync_doc()` writes only
+  when they changed. The whole doc body is replaced each time. Docs API indexes are UTF-16
+  units (`gdoc._units`).
 - `mac/` — run as a macOS background app: `pluto.sh` (install/status/logs/restart/stop/uninstall,
   bash 3.2 compatible) registers a launchd agent written by `make_plist.py` (RunAtLoad,
   KeepAlive, optional `caffeinate -i`). It never reads `.env`; it only sets it to mode 600.
