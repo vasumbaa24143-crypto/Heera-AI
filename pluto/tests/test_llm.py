@@ -239,3 +239,18 @@ def test_nvidia_appears_in_model_menu(monkeypatch):
     monkeypatch.setenv("NVIDIA_API_KEY", "n")
     assert ("nvidia", "NVIDIA Nemotron (nemotron-3.5-super-vl-120b-a12b)") in llm.choices()
     assert llm.providers("nvidia")[0] == "nvidia"
+
+
+def test_gemini_client_has_a_timeout(monkeypatch):
+    import sys
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, api_key, http_options=None):
+            seen["timeout_ms"] = http_options.timeout
+
+    monkeypatch.setattr(llm, "_client", None)
+    monkeypatch.setattr(sys.modules["google.genai"], "Client", FakeClient)
+    llm._c()
+    assert seen["timeout_ms"] == llm.TIMEOUT * 1000
+    monkeypatch.setattr(llm, "_client", None)

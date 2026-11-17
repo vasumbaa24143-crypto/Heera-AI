@@ -268,6 +268,22 @@ async def cmd_facts(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await send(update.message, [core.cmd_facts(update.effective_user.id, " ".join(ctx.args or []))])
 
 
+async def topics_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Give a topic to items saved without one (older items, plain-note fallbacks), in a
+    worker thread since it calls the AI. A quick no-op when everything is labelled."""
+    for uid in digest_users():
+        try:
+            await asyncio.to_thread(core.update_topics, uid, llm)
+        except Exception:
+            log.exception("topics job failed for user %s", uid)
+
+
+async def cmd_topic(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(update.message, [core.cmd_topic(update.effective_user.id, " ".join(ctx.args or []))])
+
+
 async def summary_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Fold chat that has left the recent window into the rolling summary (in a worker
     thread, since it may call the AI). Usually a quick no-op."""
@@ -308,6 +324,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("digest", cmd_digest))
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("facts", cmd_facts))
+    app.add_handler(CommandHandler("topic", cmd_topic))
     app.add_handler(CommandHandler("sheet", cmd_sheet))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CallbackQueryHandler(on_button))
@@ -318,6 +335,7 @@ def build_app() -> Application:
     app.job_queue.run_repeating(digest_job, interval=NUDGE_EVERY_SECONDS, first=10)
     app.job_queue.run_repeating(summary_job, interval=NUDGE_EVERY_SECONDS, first=30)
     app.job_queue.run_repeating(facts_job, interval=NUDGE_EVERY_SECONDS, first=40)
+    app.job_queue.run_repeating(topics_job, interval=NUDGE_EVERY_SECONDS, first=15)
     app.job_queue.run_repeating(sheet_job, interval=SHEET_EVERY_SECONDS, first=20)
     return app
 
