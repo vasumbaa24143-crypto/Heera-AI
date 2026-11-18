@@ -222,3 +222,16 @@ def test_old_databases_get_the_topic_column(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", str(path))
     db.init()
     assert db.get_item(1, 1)["topic"] is None and db.get_item(1, 1)["original_text"] == "old words"
+
+
+def test_edited_topic_command_gets_an_answer(monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED", str(UID))
+    sent = []
+
+    async def reply_text(text, **kw):
+        sent.append(text)
+
+    edited = SimpleNamespace(effective_user=SimpleNamespace(id=UID), message=None,
+                             effective_message=SimpleNamespace(reply_text=reply_text))
+    asyncio.run(bot.cmd_topic(edited, SimpleNamespace(args=[])))
+    assert "No topics yet" in sent[0]

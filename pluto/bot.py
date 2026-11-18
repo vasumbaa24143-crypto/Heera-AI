@@ -362,7 +362,7 @@ async def topics_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_topic(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_topic(update.effective_user.id, " ".join(ctx.args or []))])
+    await send(_msg(update), [core.cmd_topic(update.effective_user.id, " ".join(ctx.args or []))])
 
 
 async def summary_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
