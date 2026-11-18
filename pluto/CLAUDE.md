@@ -75,6 +75,8 @@ none, 40 per AI call, accepting only ids from that batch (skipped ones get "Othe
   proposes (`reply`, `save`, `done`, `reschedule`); core checks and applies (only the user's own
   open items can be marked done or moved; a moved item's reminders start afresh).
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
+  `watchdog.py` — exits the bot after 5 minutes without any answer from Telegram's
+  long poll, so the supervisor (launchd, Railway) restarts it.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`. Full-text
   search: external-content FTS5 indexes `items_fts` and `messages_fts`, kept in step by
   triggers (so `/delete` and `/forget` also clear search), `unicode61` without Porter
