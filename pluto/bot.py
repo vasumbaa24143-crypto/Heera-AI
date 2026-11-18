@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
-from telegram.error import BadRequest  # noqa: E402
+from telegram.error import BadRequest, NetworkError  # noqa: E402
 from telegram.request import HTTPXRequest  # noqa: E402
 from telegram.ext import (  # noqa: E402
     Application,
@@ -69,55 +69,129 @@ async def send(message, replies) -> None:
 
 # ---------- handlers ----------
 
+VOICE_ATTEMPTS = 3          # Telegram's file server is sometimes slow; try this many times
+VOICE_RETRY_WAIT = (2, 5)   # seconds before the 2nd and 3rd attempt
+VOICE_TIMEOUT = 60          # seconds to fetch the file (the library's default is 5)
+VOICE_RETRY = "voice:retry"
+
+
+def _msg(update):
+    """The message to read and answer. Telegram sends an edited message as
+    `edited_message` (with `message` empty), so use whichever one this update carries."""
+    return getattr(update, "effective_message", None) or update.message
+
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await update.message.reply_text(core.START_TEXT)
+    await _msg(update).reply_text(core.START_TEXT)
+
+
+async def typing(message) -> None:
+    """Show "typing…" while Pluto thinks (an answer can take a while when a provider is slow)."""
+    try:
+        await message.chat.send_action("typing")
+    except Exception:
+        pass  # only a courtesy
 
 
 async def handle_text(update: Update, text: str) -> None:
     uid = update.effective_user.id
+    await typing(_msg(update))
     replies = await asyncio.to_thread(core.chat, uid, text, llm)
-    await send(update.message, replies)
+    await send(_msg(update), replies)
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await handle_text(update, update.message.text)
+    await handle_text(update, _msg(update).text)
+
+
+async def fetch_audio(get_file) -> bytes:
+    """Download a voice note with `get_file` (e.g. voice.get_file), retrying timeouts and
+    dropped connections. A request Telegram refuses (BadRequest) is not retried."""
+    for attempt in range(VOICE_ATTEMPTS):
+        try:
+            f = await get_file(read_timeout=VOICE_TIMEOUT, connect_timeout=20)
+            buf = io.BytesIO()
+            await f.download_to_memory(buf, read_timeout=VOICE_TIMEOUT, connect_timeout=20)
+            return buf.getvalue()
+        except BadRequest:
+            raise
+        except NetworkError as e:  # includes TimedOut
+            if attempt == VOICE_ATTEMPTS - 1:
+                raise
+            log.warning("voice download attempt %d failed (%s); retrying", attempt + 1,
+                        type(e).__name__)
+            await asyncio.sleep(VOICE_RETRY_WAIT[min(attempt, len(VOICE_RETRY_WAIT) - 1)])
+
+
+def remember_voice(uid, file_id, filename, mime) -> None:
+    db.set_setting(uid, "pending_voice", json.dumps({"file_id": file_id, "filename": filename,
+                                                     "mime": mime}))
+
+
+async def hear(update: Update, get_file, filename, mime, file_id=None) -> None:
+    """Download, transcribe and answer a voice note. If it can't be fetched or understood,
+    keep its file id so the "Try again" button can retry the same note."""
+    uid = update.effective_user.id
+    message = _msg(update)
+    retry = [[("🔁 Try again", VOICE_RETRY)]] if file_id else []
+    await typing(message)
+    try:
+        audio = await fetch_audio(get_file)
+        text = await stt.transcribe(audio, filename=filename, mime=mime)
+    except stt.TranscriptionFailed as e:
+        log.warning("transcription failed: %s", e)
+        if not stt.providers():
+            await message.reply_text(
+                f"I can't listen to voice notes yet: add one of {stt.KEY_NAMES} to .env "
+                "and restart me. Meanwhile, please type it.")
+            return
+        if file_id:
+            remember_voice(uid, file_id, filename, mime)
+        await send(message, [core.Reply("I couldn't make out that voice note just now. "
+                                        "Tap Try again, or type it.", retry)])
+        return
+    except Exception:
+        log.exception("could not download the voice note")
+        if file_id:
+            remember_voice(uid, file_id, filename, mime)
+        await send(message, [core.Reply("Telegram was too slow handing me that voice note. "
+                                        "Tap Try again, or send it once more.", retry)])
+        return
+    db.set_setting(uid, "pending_voice", "")
+    if not text:
+        await message.reply_text("I heard silence. Try again?")
+        return
+    await message.reply_text(f"🎙 Heard: {text}")
+    await handle_text(update, text)
 
 
 async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    v = update.message.voice or update.message.audio
+    v = _msg(update).voice or _msg(update).audio
+    await hear(update, v.get_file, getattr(v, "file_name", None) or "voice.ogg",
+               getattr(v, "mime_type", None) or "audio/ogg", getattr(v, "file_id", None))
+
+
+async def retry_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The "Try again" button under a voice note that failed."""
+    uid = update.effective_user.id
     try:
-        f = await v.get_file()
-        buf = io.BytesIO()
-        await f.download_to_memory(buf)
-        text = await stt.transcribe(
-            buf.getvalue(),
-            filename=getattr(v, "file_name", None) or "voice.ogg",
-            mime=getattr(v, "mime_type", None) or "audio/ogg",
-        )
-    except stt.TranscriptionFailed as e:
-        log.warning("transcription failed: %s", e)
-        if not stt.providers():
-            msg = (f"I can't listen to voice notes yet: add one of {stt.KEY_NAMES} to .env "
-                   "and restart me. Meanwhile, please type it.")
-        else:
-            msg = "I couldn't make out that voice note just now. Please try again or type it."
-        await update.message.reply_text(msg)
+        pending = json.loads(db.get_setting(uid, "pending_voice") or "{}")
+    except ValueError:
+        pending = {}
+    if not pending.get("file_id"):
+        await _msg(update).reply_text("I don't have a voice note waiting. Please send it again.")
         return
-    except Exception:
-        log.exception("could not download the voice note")
-        await update.message.reply_text("I couldn't download that voice note. Please try again.")
-        return
-    if not text:
-        await update.message.reply_text("I heard silence. Try again?")
-        return
-    await update.message.reply_text(f"🎙 Heard: {text}")
-    await handle_text(update, text)
+
+    async def get_file(**timeouts):
+        return await ctx.bot.get_file(pending["file_id"], **timeouts)
+
+    await hear(update, get_file, pending.get("filename") or "voice.ogg",
+               pending.get("mime") or "audio/ogg", pending["file_id"])
 
 
 def _arg(ctx):
@@ -127,62 +201,69 @@ def _arg(ctx):
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_list(update.effective_user.id)])
+    await send(_msg(update), [core.cmd_list(update.effective_user.id)])
 
 
 async def cmd_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_done(update.effective_user.id, _arg(ctx))])
+    await send(_msg(update), [core.cmd_done(update.effective_user.id, _arg(ctx))])
 
 
 async def cmd_snooze(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_snooze(update.effective_user.id, _arg(ctx))])
+    await send(_msg(update), [core.cmd_snooze(update.effective_user.id, _arg(ctx))])
 
 
 async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_delete(update.effective_user.id, _arg(ctx))])
+    await send(_msg(update), [core.cmd_delete(update.effective_user.id, _arg(ctx))])
 
 
 async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_forget(update.effective_user.id)])
+    await send(_msg(update), [core.cmd_forget(update.effective_user.id)])
 
 
 async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_model(update.effective_user.id, llm, _arg(ctx))])
+    await send(_msg(update), [core.cmd_model(update.effective_user.id, llm, _arg(ctx))])
 
 
 async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_digest(update.effective_user.id, _arg(ctx))])
+    await send(_msg(update), [core.cmd_digest(update.effective_user.id, _arg(ctx))])
 
 
 async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_summary(update.effective_user.id)])
+    await send(_msg(update), [core.cmd_summary(update.effective_user.id)])
 
 
 async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
     data = core.export_json(update.effective_user.id)
-    await update.message.reply_document(io.BytesIO(data.encode()), filename="pluto-export.json")
+    await _msg(update).reply_document(io.BytesIO(data.encode()), filename="pluto-export.json")
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()  # always stop the button's loading spinner
     if not allowed(update):
+        return
+    if q.data == VOICE_RETRY:
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+        await retry_voice(update, ctx)
         return
     reply = core.button(update.effective_user.id, q.data, llm=llm)
     if reply is None:
@@ -252,7 +333,7 @@ async def cmd_sheet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             log.warning("sheet sync failed for user %s: %s", uid, e)
     reply = core.cmd_sheet(uid, sheets.problem(), sheets.url(), sheets.service_account_email())
-    await update.message.reply_text(reply.text, disable_web_page_preview=True)
+    await _msg(update).reply_text(reply.text, disable_web_page_preview=True)
 
 
 async def facts_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -267,7 +348,23 @@ async def facts_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_facts(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_facts(update.effective_user.id, " ".join(ctx.args or []))])
+    await send(_msg(update), [core.cmd_facts(update.effective_user.id, " ".join(ctx.args or []))])
+
+
+async def topics_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Give a topic to items saved without one (older items, plain-note fallbacks), in a
+    worker thread since it calls the AI. A quick no-op when everything is labelled."""
+    for uid in digest_users():
+        try:
+            await asyncio.to_thread(core.update_topics, uid, llm)
+        except Exception:
+            log.exception("topics job failed for user %s", uid)
+
+
+async def cmd_topic(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(_msg(update), [core.cmd_topic(update.effective_user.id, " ".join(ctx.args or []))])
 
 
 async def summary_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -327,6 +424,7 @@ def build_app(dog: watchdog.Watchdog | None = None) -> Application:
     app.add_handler(CommandHandler("digest", cmd_digest))
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("facts", cmd_facts))
+    app.add_handler(CommandHandler("topic", cmd_topic))
     app.add_handler(CommandHandler("sheet", cmd_sheet))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CallbackQueryHandler(on_button))
@@ -337,6 +435,7 @@ def build_app(dog: watchdog.Watchdog | None = None) -> Application:
     app.job_queue.run_repeating(digest_job, interval=NUDGE_EVERY_SECONDS, first=10)
     app.job_queue.run_repeating(summary_job, interval=NUDGE_EVERY_SECONDS, first=30)
     app.job_queue.run_repeating(facts_job, interval=NUDGE_EVERY_SECONDS, first=40)
+    app.job_queue.run_repeating(topics_job, interval=NUDGE_EVERY_SECONDS, first=15)
     app.job_queue.run_repeating(sheet_job, interval=SHEET_EVERY_SECONDS, first=20)
     return app
 
