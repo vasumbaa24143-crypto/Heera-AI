@@ -31,6 +31,7 @@ something; ask "what's on my plate today?" or "what have we discussed about X?".
 /model [name]      choose which AI thinks first (buttons, or e.g. /model groq)
 /summary           what Pluto remembers from older chats
 /facts [delete N|clear]  what Pluto knows about you (updated nightly after 03:30)
+/topic [name | <id> <name>]  your topics, one topic's items, or move an item
 /forget            clear the chat history and summary (items are kept)
 /export            print everything as JSON
 /tap <data>        press a button, e.g. /tap done:3
@@ -72,6 +73,8 @@ class Session:
             return render([core.cmd_model(self.uid, self.llm, arg)])
         if cmd == "/facts":
             return render([core.cmd_facts(self.uid, arg)])
+        if cmd == "/topic":
+            return render([core.cmd_topic(self.uid, arg)])
         if cmd == "/summary":
             return render([core.cmd_summary(self.uid)])
         if cmd == "/digest":

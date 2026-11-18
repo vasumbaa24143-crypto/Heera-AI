@@ -64,6 +64,8 @@ def init() -> None:
             c.execute("ALTER TABLE items ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'")
         if "closed_at" not in cols:  # when it was marked done or dropped (NULL while open)
             c.execute("ALTER TABLE items ADD COLUMN closed_at TEXT")
+        if "topic" not in cols:  # derived life-area label ("Jobs", "Money"); NULL = not labelled yet
+            c.execute("ALTER TABLE items ADD COLUMN topic TEXT")
         c.execute(
             """CREATE TABLE IF NOT EXISTS nudges(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -260,16 +262,57 @@ def existing_item_ids(user_id, ids) -> set:
     return {r["id"] for r in rows}
 
 
-def add_item(user_id, kind, title, original_text, due_at=None, now=None, priority="normal") -> int:
+def add_item(user_id, kind, title, original_text, due_at=None, now=None, priority="normal",
+             topic=None) -> int:
     if priority not in PRIORITIES:
         priority = "normal"
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO items(user_id, kind, title, original_text, due_at, created_at, priority)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (user_id, kind, title, original_text, due_at, to_str(now or now_utc()), priority),
+            "INSERT INTO items(user_id, kind, title, original_text, due_at, created_at, priority, topic)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (user_id, kind, title, original_text, due_at, to_str(now or now_utc()), priority,
+             topic or None),
         )
         return cur.lastrowid
+
+
+# ---------- topics (derived labels; the user's words are never touched) ----------
+
+def set_topic(user_id, item_id, topic) -> bool:
+    with conn() as c:
+        cur = c.execute("UPDATE items SET topic=? WHERE id=? AND user_id=?",
+                        (topic or None, item_id, user_id))
+        return cur.rowcount > 0
+
+
+def unlabelled_items(user_id, limit=40):
+    """Items with no topic yet, oldest first."""
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE user_id=? AND topic IS NULL ORDER BY id LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+
+
+def topic_counts(user_id) -> list:
+    """[(topic, number of items)] for this user's labelled items, biggest first."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT topic, COUNT(*) AS n FROM items WHERE user_id=? AND topic IS NOT NULL"
+            " GROUP BY topic ORDER BY n DESC, topic",
+            (user_id,),
+        ).fetchall()
+    return [(r["topic"], r["n"]) for r in rows]
+
+
+def items_in_topic(user_id, topic, limit=30):
+    """Open items first (most urgent first), then closed ones, matching `topic` (any case)."""
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE user_id=? AND topic=? COLLATE NOCASE"
+            f" ORDER BY status!='open', COALESCE(due_at,'9999'), {_PRIORITY_ORDER}, id DESC LIMIT ?",
+            (user_id, topic, limit),
+        ).fetchall()
 
 
 def get_item(user_id, item_id):
@@ -561,6 +604,18 @@ def delete_item(user_id, item_id) -> bool:
             # A summary may still mention those words: drop it; it's rebuilt from what's left.
             c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))
         return True
+
+
+def reschedule(user_id, item_id, due_at) -> bool:
+    """Give an open item a new due time (None = no time) and start its reminders afresh,
+    so the first alert goes out at the new time."""
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE items SET due_at=?, nudge_count=0, last_nudged_at=NULL, snoozed_until=NULL"
+            " WHERE id=? AND user_id=? AND status='open'",
+            (due_at, item_id, user_id),
+        )
+        return cur.rowcount > 0
 
 
 def snooze(user_id, item_id, hours=24, now=None) -> bool:

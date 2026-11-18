@@ -33,6 +33,35 @@ python bot.py
    - "remind me kal shaam Rahul ko deck bhejna hai"
    - then ask: "aaj aur kal kya kya hai?" or "YouTube wala idea kya tha?"
 
+## Run it on a Mac in the background
+
+So you don't need a terminal window open:
+
+```bash
+cd ~/Heera-AI/pluto
+./mac/pluto.sh install --awake
+```
+
+This creates the Python environment if needed, installs the requirements, checks your `.env` (and creates it
+from the template the first time, then stops so you can fill it in), and registers Pluto as a background app
+that **starts when you log in and restarts itself if it stops**.
+
+| Command | What it does |
+|---|---|
+| `./mac/pluto.sh status` | Is it running? Shows the last log line. |
+| `./mac/pluto.sh logs` | Follow the log (Ctrl-C to stop watching). |
+| `./mac/pluto.sh restart` | Use after changing `.env` or pulling new code. |
+| `./mac/pluto.sh stop` / `start` | Pause and resume. |
+| `./mac/pluto.sh uninstall` | Remove the background app. Your data, `.env` and logs stay. |
+
+- `--awake` stops the Mac from idle-sleeping while Pluto runs (it uses macOS's own `caffeinate`). Leave it off
+  to let the Mac sleep normally; reminders then wait until it wakes.
+- **Closing the lid still puts a MacBook to sleep**, so reminders pause until you open it. Reminders due while it
+  slept arrive when it wakes, and the morning digest catches up within 4 hours. For truly always-on, deploy it (below).
+- Keep the `Heera-AI` folder in your home folder. macOS restricts background apps inside Documents, Desktop and Downloads.
+- Logs are in `~/Library/Logs/Pluto/pluto.log`. The background job is `~/Library/LaunchAgents/com.heeralal.pluto.plist`.
+- Don't also run `python bot.py` by hand while it's installed: two copies would fight over Telegram.
+
 ## Try it without Telegram
 
 ```bash
@@ -54,7 +83,7 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/facts` (what Pluto knows about you; `/facts delete 3`, `/facts clear`) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/forget` (clear chat history, its summary and profile facts) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/facts` (what Pluto knows about you; `/facts delete 3`, `/facts clear`) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/topic` (your topics; `/topic jobs`, `/topic 12 Money`) · `/forget` (clear chat history, its summary and profile facts) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
 
 ## Morning digest
 
@@ -85,10 +114,23 @@ One message each morning (08:30 by default, in `PLUTO_TZ`):
 ## Google Sheet dashboard (optional)
 
 Pluto can keep a Google Sheet up to date with four tabs:
-- **Dashboard:** overdue, due today, due this week, urgent, open to-dos, ideas, notes, and finished in the last 7 days.
-- **To-dos:** every open to-do and reminder, most urgent first, with priority, due date and your own words.
+- **Dashboard:** a one-line "start with…" headline; tiles for overdue, due today, this week, urgent, open
+  to-dos, ideas, notes and done in the last 7 days; **Focus now** (overdue, due today, urgent); **Coming up**
+  (next 7 days); **By topic**; **Recently saved**; **Recently finished**.
+- **To-dos:** every open to-do and reminder, most urgent first, with topic, priority, due date, status
+  ("⚠️ Overdue · 3 days", "📅 Today") and your own words. Overdue rows are red, today blue, urgent orange.
 - **Done:** finished and dropped items, with when.
-- **Notes & ideas:** everything else you saved.
+- **Notes & ideas:** everything else you saved, grouped by topic like a notebook.
+
+**Topics.** Every item gets a short topic (Jobs, Money, Content ideas, a project's name…) so the dashboard can
+group things. The assistant picks it when it saves the item, reusing your existing topics; a background job labels
+anything saved without one (older items, plain-note fallbacks) a batch at a time. Topics are derived labels: your own
+words are never changed. `/topic` lists them, `/topic jobs` shows one, `/topic 12 Money` moves an item.
+
+Colours, column widths, frozen headers and filters come from the Apps Script (option A). If you set up the sheet with
+an older copy of `Code.gs`, paste the new one over it (keep your secret word), save, then **Deploy → Manage
+deployments → edit (pencil) → Version: New version → Deploy**. The `/exec` link stays the same. Until then the sheet
+gets the new rows without the colours. The service account (option B) writes the values only.
 
 With option A or B, Pluto checks every 5 minutes and writes only when something changed. It's **one-way**: edits
 you make in the sheet are overwritten, so mark things done in Telegram. Text is always stored as plain text, so
@@ -174,6 +216,12 @@ keys live only in `.env`.
 `Procfile` has `worker: python bot.py` for Railway. Add the `.env` values as Railway variables,
 and mount a volume for the database (set `PLUTO_DB` to a path on the volume, e.g. `/data/pluto.db`).
 The bot must be running to nudge.
+
+If Telegram stops answering for 5 minutes (the network dropped and polling hung, as
+happened once), the bot logs `No answer from Telegram` and exits on purpose, so whatever
+runs it can start it again: Railway's restart policy, or on a Mac a launchd login item
+with `KeepAlive`. Messages sent meanwhile wait at Telegram (up to 24 hours) and arrive
+after the restart. Run by hand, it simply stops; start it again.
 
 ## Known limits
 

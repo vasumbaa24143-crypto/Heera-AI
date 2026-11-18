@@ -100,3 +100,23 @@ def test_silence_returns_empty(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "g")
     monkeypatch.setattr(stt, "_post_file", FakeUpload({"groq.com": {"text": "   "}}))
     assert run(stt.transcribe(b"x")) == ""
+
+
+def test_gemini_voice_call_has_a_timeout(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, api_key, http_options=None):
+            seen["timeout_ms"] = http_options.timeout
+
+            async def generate_content(**kw):
+                return SimpleNamespace(text="namaste")
+
+            self.aio = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(sys.modules["google.genai"], "Client", FakeClient)
+    assert asyncio.run(stt._gemini(b"audio", "voice.ogg", "audio/ogg")) == "namaste"
+    assert seen["timeout_ms"] == stt.TIMEOUT * 1000
