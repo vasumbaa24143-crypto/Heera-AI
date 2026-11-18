@@ -72,6 +72,23 @@ def test_delete_removes_forever():
     assert "can't find" in core.cmd_delete(UID, str(i)).text
 
 
+def test_delete_also_removes_its_nudges_from_the_chat():
+    i = add(UID, "task", "Barber", None, text="barber at 6.30")
+    other = add(UID, "task", "Gym", None, text="gym")
+    core.record_nudge(UID, i, core.Reply(f"⏰ Reminder: Barber (#{i})"), NOW)
+    core.record_nudge(UID, other, core.Reply(f"⏰ Reminder: Gym (#{other})"), NOW)
+    core.cmd_delete(UID, str(i))
+    assert [m["text"] for m in db.recent_messages(UID)] == [f"⏰ Reminder: Gym (#{other})"]
+
+
+def test_deleting_an_item_with_only_a_nudge_in_the_chat_drops_the_summary():
+    i = add(UID, "task", "Barber", None, text="barber at 6.30")
+    core.record_nudge(UID, i, core.Reply(f"⏰ Reminder: Barber (#{i})"), NOW)
+    db.add_summary(UID, 1, 1, "Reminded about the barber.", now=NOW)
+    core.cmd_delete(UID, str(i))
+    assert db.latest_summary(UID) is None
+
+
 def test_forget_clears_chat_but_keeps_items():
     i = add(UID)
     db.add_message(UID, "user", "hello", now=NOW)
