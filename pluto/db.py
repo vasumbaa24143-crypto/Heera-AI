@@ -4,6 +4,7 @@ Every function that depends on the current time takes an optional `now`
 (an aware UTC datetime) so tests and simulate.py can control the clock.
 """
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -61,6 +62,10 @@ def init() -> None:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(items)")}
         if "priority" not in cols:  # databases made before priorities existed
             c.execute("ALTER TABLE items ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'")
+        if "closed_at" not in cols:  # when it was marked done or dropped (NULL while open)
+            c.execute("ALTER TABLE items ADD COLUMN closed_at TEXT")
+        if "topic" not in cols:  # derived life-area label ("Jobs", "Money"); NULL = not labelled yet
+            c.execute("ALTER TABLE items ADD COLUMN topic TEXT")
         c.execute(
             """CREATE TABLE IF NOT EXISTS nudges(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,6 +85,31 @@ def init() -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS messages_user ON messages(user_id, id)")
         c.execute(
+            """CREATE TABLE IF NOT EXISTS summaries(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                from_msg_id INTEGER NOT NULL,  -- first message this summary covers
+                to_msg_id INTEGER NOT NULL,    -- last message it covers
+                text TEXT NOT NULL,            -- derived; may be "" when nothing was worth keeping
+                created_at TEXT NOT NULL
+            )"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS summaries_user ON summaries(user_id, id)")
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS facts(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                text TEXT NOT NULL,             -- derived; one short atomic fact
+                mark TEXT NOT NULL,             -- permanent | durable | ephemeral
+                source TEXT NOT NULL,           -- e.g. "summary:12", "notes", "update:7"
+                status TEXT NOT NULL DEFAULT 'active',  -- active | superseded | retired
+                superseded_by INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS facts_user ON facts(user_id, status)")
+        c.execute(
             """CREATE TABLE IF NOT EXISTS settings(
                 user_id INTEGER NOT NULL,
                 key TEXT NOT NULL,
@@ -92,18 +122,197 @@ def init() -> None:
         # Older prototype builds soft-deleted rows; /delete promises "remove forever".
         c.execute("DELETE FROM nudges WHERE item_id IN (SELECT id FROM items WHERE status='deleted')")
         c.execute("DELETE FROM items WHERE status='deleted'")
+        _init_search(c)
 
 
-def add_item(user_id, kind, title, original_text, due_at=None, now=None, priority="normal") -> int:
+# ---------- full-text search (SQLite FTS5) ----------
+#
+# Two external-content FTS5 indexes point at the real rows in `items` and `messages`,
+# so the text isn't stored twice and the original rows stay the source of truth.
+# Triggers keep them in step on insert/delete (and on the rare item update), which
+# also makes /delete and /forget remove things from search. The `unicode61`
+# tokenizer is used without Porter stemming, which is English-only and would mangle
+# Hinglish words. If this SQLite has no FTS5, search falls back to LIKE.
+
+HAS_FTS = None  # set by init()
+
+_SEARCH_TABLES = {
+    # index table: (content table, indexed columns)
+    "items_fts": ("items", ("title", "original_text")),
+    "messages_fts": ("messages", ("text",)),
+}
+
+
+def _init_search(c) -> None:
+    global HAS_FTS
+    try:
+        for fts, (table, cols) in _SEARCH_TABLES.items():
+            existed = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (fts,)
+            ).fetchone()
+            col_list = ", ".join(cols)
+            c.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5({col_list},"
+                f" content='{table}', content_rowid='id',"
+                " tokenize='unicode61 remove_diacritics 2')"
+            )
+            new = ", ".join(f"new.{x}" for x in cols)
+            old = ", ".join(f"old.{x}" for x in cols)
+            c.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_ai AFTER INSERT ON {table} BEGIN"
+                f" INSERT INTO {fts}(rowid, {col_list}) VALUES (new.id, {new}); END"
+            )
+            c.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_ad AFTER DELETE ON {table} BEGIN"
+                f" INSERT INTO {fts}({fts}, rowid, {col_list}) VALUES ('delete', old.id, {old}); END"
+            )
+            c.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {fts}_au AFTER UPDATE OF {col_list} ON {table} BEGIN"
+                f" INSERT INTO {fts}({fts}, rowid, {col_list}) VALUES ('delete', old.id, {old});"
+                f" INSERT INTO {fts}(rowid, {col_list}) VALUES (new.id, {new}); END"
+            )
+            if not existed:  # first run on an existing database: index what's already there
+                c.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+        HAS_FTS = True
+    except sqlite3.OperationalError as e:
+        if "fts5" not in str(e).lower():
+            raise
+        HAS_FTS = False  # this SQLite build has no FTS5: search uses LIKE instead
+
+
+_TOKEN = re.compile(r"[\w\u0900-\u097F]+")  # words, including Devanagari
+STOPWORDS = frozenset("""
+a an and are as at be but by did do does for from had has have i if in into is it its me my of
+on or our so than that the their them then there these they this to us was we were what when
+where which who why will with would you your about tell said say discussed remember anything
+something please pluto
+kya kab kaun kahan kaise kyun tha thi the hai hain ho hoga ka ki ke ko se me mein mai main par pe
+wala wali wale aur ya bhi to toh na nahi mujhe mera meri mere hum humne maine tum tumne aap
+baare bare baat baatein
+""".split())
+
+
+def search_terms(query: str) -> list:
+    """Meaningful words from a question, lower-cased, stop-words removed, de-duplicated."""
+    words = [w.lower() for w in _TOKEN.findall(query or "")]
+    return list(dict.fromkeys(w for w in words if len(w) > 1 and w not in STOPWORDS))
+
+
+def _match_query(terms) -> str:
+    """Safe FTS5 query: each word quoted (so punctuation can't break the syntax), OR-ed, with
+    prefix matching for longer words ("birthday" also finds "birthdays"). BM25 ranks rows that
+    match more of the words higher."""
+    parts = []
+    for t in terms:
+        q = '"' + t.replace('"', '""') + '"'
+        parts.append(q + "*" if len(t) >= 4 else q)
+    return " OR ".join(parts)
+
+
+def _search(table, fts, cols, user_id, query, k, extra_where="", extra_args=()):
+    terms = search_terms(query)
+    if not terms or k <= 0:
+        return []
+    if HAS_FTS:
+        try:
+            with conn() as c:
+                return c.execute(
+                    f"SELECT t.* FROM {fts} JOIN {table} t ON t.id = {fts}.rowid"
+                    f" WHERE {fts} MATCH ? AND t.user_id=? {extra_where}"
+                    f" ORDER BY bm25({fts}), t.id DESC LIMIT ?",
+                    (_match_query(terms), user_id, *extra_args, k),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            pass  # unexpected query trouble: fall back to LIKE below
+    like = " OR ".join(f"{col} LIKE ?" for _ in terms for col in cols)
+    args = [f"%{t}%" for t in terms for _ in cols]
+    with conn() as c:
+        return c.execute(
+            f"SELECT t.* FROM {table} t WHERE t.user_id=? AND ({like}) {extra_where}"
+            " ORDER BY t.id DESC LIMIT ?",
+            (user_id, *args, *extra_args, k),
+        ).fetchall()
+
+
+def search_items(user_id, query, k=10, exclude_ids=()):
+    """The user's saved items that best match the words in `query`."""
+    ex = tuple(exclude_ids)
+    where = f"AND t.id NOT IN ({','.join('?' * len(ex))})" if ex else ""
+    return _search("items", "items_fts", ("title", "original_text"), user_id, query, k, where, ex)
+
+
+def search_messages(user_id, query, k=10, before_id=None):
+    """Past chat messages (both sides) that best match `query`, oldest-first in the result.
+    `before_id` limits the search to messages older than that id (i.e. not already in the
+    recent conversation)."""
+    where, args = ("AND t.id < ?", (before_id,)) if before_id else ("", ())
+    rows = _search("messages", "messages_fts", ("text",), user_id, query, k, where, args)
+    return sorted(rows, key=lambda r: r["id"])
+
+
+def existing_item_ids(user_id, ids) -> set:
+    ids = tuple(ids)
+    if not ids:
+        return set()
+    with conn() as c:
+        rows = c.execute(
+            f"SELECT id FROM items WHERE user_id=? AND id IN ({','.join('?' * len(ids))})",
+            (user_id, *ids),
+        ).fetchall()
+    return {r["id"] for r in rows}
+
+
+def add_item(user_id, kind, title, original_text, due_at=None, now=None, priority="normal",
+             topic=None) -> int:
     if priority not in PRIORITIES:
         priority = "normal"
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO items(user_id, kind, title, original_text, due_at, created_at, priority)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (user_id, kind, title, original_text, due_at, to_str(now or now_utc()), priority),
+            "INSERT INTO items(user_id, kind, title, original_text, due_at, created_at, priority, topic)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (user_id, kind, title, original_text, due_at, to_str(now or now_utc()), priority,
+             topic or None),
         )
         return cur.lastrowid
+
+
+# ---------- topics (derived labels; the user's words are never touched) ----------
+
+def set_topic(user_id, item_id, topic) -> bool:
+    with conn() as c:
+        cur = c.execute("UPDATE items SET topic=? WHERE id=? AND user_id=?",
+                        (topic or None, item_id, user_id))
+        return cur.rowcount > 0
+
+
+def unlabelled_items(user_id, limit=40):
+    """Items with no topic yet, oldest first."""
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE user_id=? AND topic IS NULL ORDER BY id LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+
+
+def topic_counts(user_id) -> list:
+    """[(topic, number of items)] for this user's labelled items, biggest first."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT topic, COUNT(*) AS n FROM items WHERE user_id=? AND topic IS NOT NULL"
+            " GROUP BY topic ORDER BY n DESC, topic",
+            (user_id,),
+        ).fetchall()
+    return [(r["topic"], r["n"]) for r in rows]
+
+
+def items_in_topic(user_id, topic, limit=30):
+    """Open items first (most urgent first), then closed ones, matching `topic` (any case)."""
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE user_id=? AND topic=? COLLATE NOCASE"
+            f" ORDER BY status!='open', COALESCE(due_at,'9999'), {_PRIORITY_ORDER}, id DESC LIMIT ?",
+            (user_id, topic, limit),
+        ).fetchall()
 
 
 def get_item(user_id, item_id):
@@ -131,11 +340,13 @@ def recall_pool(user_id, limit=300):
         ).fetchall()
 
 
-def context_items(user_id, open_limit=300, closed_limit=50):
-    """What the assistant gets to see: all open items plus the most recent closed ones."""
+def context_items(user_id, open_limit=150, closed_limit=20):
+    """Items the assistant always sees: open items (the most urgent `open_limit`) plus the
+    most recently closed ones. Older items reach it through search_items()."""
     with conn() as c:
         opened = c.execute(
-            "SELECT * FROM items WHERE user_id=? AND status='open' ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM items WHERE user_id=? AND status='open'"
+            f" ORDER BY COALESCE(due_at,'9999') ASC, {_PRIORITY_ORDER}, id DESC LIMIT ?",
             (user_id, open_limit),
         ).fetchall()
         closed = c.execute(
@@ -186,9 +397,166 @@ def recent_messages(user_id, limit=100):
 
 
 def forget_messages(user_id) -> int:
-    """Clear the conversation log (saved items are kept)."""
+    """Clear the conversation log and everything derived from it: summaries and profile
+    facts (saved items are kept)."""
     with conn() as c:
+        c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))
+        c.execute("DELETE FROM facts WHERE user_id=?", (user_id,))
         return c.execute("DELETE FROM messages WHERE user_id=?", (user_id,)).rowcount
+
+
+# ---------- rolling summaries ----------
+#
+# Messages that have scrolled out of the recent window (the last `window` messages) are
+# folded into one rolling summary per user. Each new summary merges the previous one with
+# the next batch, and covers everything from the first message up to `to_msg_id`. Only the
+# latest row is used; older rows are kept small and pruned.
+
+def latest_summary(user_id):
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM summaries WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,)
+        ).fetchone()
+
+
+def add_summary(user_id, from_msg_id, to_msg_id, text, now=None) -> int:
+    with conn() as c:
+        cur = c.execute(
+            "INSERT INTO summaries(user_id, from_msg_id, to_msg_id, text, created_at)"
+            " VALUES (?,?,?,?,?)",
+            (user_id, from_msg_id, to_msg_id, text, to_str(now or now_utc())),
+        )
+        # keep the last few for /export and debugging; only the newest is used
+        c.execute(
+            "DELETE FROM summaries WHERE user_id=? AND id NOT IN"
+            " (SELECT id FROM summaries WHERE user_id=? ORDER BY id DESC LIMIT 5)",
+            (user_id, user_id),
+        )
+        return cur.lastrowid
+
+
+def delete_summaries(user_id) -> None:
+    with conn() as c:
+        c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))
+
+
+def unsummarised_messages(user_id, window, limit):
+    """Messages older than the last `window` messages that no summary covers yet, oldest
+    first (at most `limit`), and how many there are in total."""
+    with conn() as c:
+        start = c.execute(
+            "SELECT id FROM messages WHERE user_id=? ORDER BY id DESC LIMIT 1 OFFSET ?",
+            (user_id, window - 1),
+        ).fetchone()
+        if start is None:
+            return [], 0  # everything is still in the recent window
+        last = c.execute(
+            "SELECT to_msg_id FROM summaries WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        after = last["to_msg_id"] if last else 0
+        where = "user_id=? AND id>? AND id<?"
+        args = (user_id, after, start["id"])
+        total = c.execute(f"SELECT COUNT(*) FROM messages WHERE {where}", args).fetchone()[0]
+        rows = c.execute(
+            f"SELECT * FROM messages WHERE {where} ORDER BY id LIMIT ?", (*args, limit)
+        ).fetchall()
+    return rows, total
+
+
+# ---------- profile facts ----------
+#
+# Short, derived facts about the person (people, preferences, routines, goals), built
+# nightly from the rolling summary and new notes. Automation never edits a fact in place:
+# a correction adds a new row and marks the old one superseded; a fact that's no longer
+# true is marked retired. Only the user (/facts delete, /facts clear, /forget) hard-deletes.
+
+FACT_MARKS = ("permanent", "durable", "ephemeral")
+
+
+def active_facts(user_id):
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM facts WHERE user_id=? AND status='active' ORDER BY id", (user_id,)
+        ).fetchall()
+
+
+def add_fact(user_id, text, mark, source, now=None) -> int:
+    now_s = to_str(now or now_utc())
+    with conn() as c:
+        return c.execute(
+            "INSERT INTO facts(user_id, text, mark, source, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (user_id, text, mark if mark in FACT_MARKS else "durable", source, now_s, now_s),
+        ).lastrowid
+
+
+def retire_fact(user_id, fact_id, now=None, superseded_by=None) -> bool:
+    status = "superseded" if superseded_by else "retired"
+    with conn() as c:
+        return c.execute(
+            "UPDATE facts SET status=?, superseded_by=?, updated_at=?"
+            " WHERE id=? AND user_id=? AND status='active'",
+            (status, superseded_by, to_str(now or now_utc()), fact_id, user_id),
+        ).rowcount > 0
+
+
+def delete_fact(user_id, fact_id) -> bool:
+    with conn() as c:
+        return c.execute(
+            "DELETE FROM facts WHERE id=? AND user_id=?", (fact_id, user_id)
+        ).rowcount > 0
+
+
+def delete_facts(user_id) -> int:
+    with conn() as c:
+        return c.execute("DELETE FROM facts WHERE user_id=?", (user_id,)).rowcount
+
+
+def delete_facts_mentioning(user_id, text) -> int:
+    """Hard-delete facts (any status) that share the key words of `text`: at least two of
+    them, or the only one if `text` has just one. Used when the user deletes an item."""
+    terms = set(search_terms(text)[:8])
+    if not terms:
+        return 0
+    need = min(2, len(terms))
+    with conn() as c:
+        rows = c.execute("SELECT id, text FROM facts WHERE user_id=?", (user_id,)).fetchall()
+        doomed = [r["id"] for r in rows if len(terms & set(search_terms(r["text"]))) >= need]
+        for fid in doomed:
+            c.execute("DELETE FROM facts WHERE id=? AND user_id=?", (fid, user_id))
+    return len(doomed)
+
+
+def notes_since(user_id, after_id, limit=50):
+    """Notes and ideas saved after item id `after_id` (oldest first), for the nightly facts."""
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE user_id=? AND id>? AND kind IN ('note','idea')"
+            " ORDER BY id LIMIT ?",
+            (user_id, after_id, limit),
+        ).fetchall()
+
+
+def max_item_id(user_id) -> int:
+    with conn() as c:
+        return c.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM items WHERE user_id=?", (user_id,)
+        ).fetchone()[0]
+
+
+def export_facts(user_id):
+    with conn() as c:
+        rows = c.execute("SELECT * FROM facts WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def export_summaries(user_id):
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM summaries WHERE user_id=? ORDER BY id", (user_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def export_messages(user_id):
@@ -199,13 +567,14 @@ def export_messages(user_id):
     return [dict(r) for r in rows]
 
 
-def set_status(user_id, item_id, status) -> bool:
+def set_status(user_id, item_id, status, now=None) -> bool:
     if status not in STATUSES:
         raise ValueError(f"unknown status {status!r}")
+    closed = None if status == "open" else to_str(now or now_utc())
     with conn() as c:
         cur = c.execute(
-            "UPDATE items SET status=? WHERE id=? AND user_id=?",
-            (status, item_id, user_id),
+            "UPDATE items SET status=?, closed_at=? WHERE id=? AND user_id=?",
+            (status, closed, item_id, user_id),
         )
         return cur.rowcount > 0
 
@@ -220,12 +589,33 @@ def delete_item(user_id, item_id) -> bool:
             return False
         c.execute("DELETE FROM items WHERE id=? AND user_id=?", (item_id, user_id))
         c.execute("DELETE FROM nudges WHERE item_id=? AND user_id=?", (item_id, user_id))
+        removed = 0
         for line in row["original_text"].split("\n"):
-            c.execute(
+            removed += c.execute(
                 "DELETE FROM messages WHERE user_id=? AND role='user' AND text=?",
                 (user_id, line),
-            )
+            ).rowcount
+        # Nudges kept in the chat name their item as "(#id)".
+        removed += c.execute(
+            "DELETE FROM messages WHERE user_id=? AND role='pluto' AND instr(text, ?) > 0",
+            (user_id, f"(#{item_id})"),
+        ).rowcount
+        if removed:
+            # A summary may still mention those words: drop it; it's rebuilt from what's left.
+            c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))
         return True
+
+
+def reschedule(user_id, item_id, due_at) -> bool:
+    """Give an open item a new due time (None = no time) and start its reminders afresh,
+    so the first alert goes out at the new time."""
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE items SET due_at=?, nudge_count=0, last_nudged_at=NULL, snoozed_until=NULL"
+            " WHERE id=? AND user_id=? AND status='open'",
+            (due_at, item_id, user_id),
+        )
+        return cur.rowcount > 0
 
 
 def snooze(user_id, item_id, hours=24, now=None) -> bool:
@@ -265,7 +655,7 @@ def nudges_last_24h(user_id, now=None) -> int:
         ).fetchone()[0]
 
 
-def pick_nudges(now=None, quiet=False):
+def pick_nudges(now=None, quiet=False, idea_nudges=lambda uid: True):
     """Return (item_row, reason) pairs that should be nudged now.
 
     reason is:
@@ -274,7 +664,8 @@ def pick_nudges(now=None, quiet=False):
       'due'      - a repeat nudge for an item still open after its due time;
       'stale'    - an idea left untouched for a while.
     Repeats and stale ideas respect the daily cap (per user) and are held back
-    while `quiet` (quiet hours) is true. Overdue items go before stale ideas;
+    while `quiet` (quiet hours) is true. `idea_nudges(uid)` says whether that user
+    gets separate stale-idea nudges. Overdue items go before stale ideas;
     within each, items nudged the fewest times go first, then the oldest."""
     now = now or now_utc()
     now_s = to_str(now)
@@ -298,7 +689,7 @@ def pick_nudges(now=None, quiet=False):
                 and (last is None or now - last >= timedelta(hours=DUE_GAP_HOURS))
             ):
                 candidates.append((0, r["nudge_count"], r["due_at"], r["id"], r, "due"))
-        elif r["kind"] == "idea":
+        elif r["kind"] == "idea" and idea_nudges(r["user_id"]):
             age = now - from_str(r["created_at"])
             if (
                 age >= timedelta(days=IDEA_AFTER_DAYS)
@@ -323,6 +714,50 @@ def pick_nudges(now=None, quiet=False):
         per_user[uid] += 1
         picked.append((r, reason))
     return picked
+
+
+# ---------- daily digest ----------
+
+def count_items(user_id) -> int:
+    with conn() as c:
+        return c.execute("SELECT COUNT(*) FROM items WHERE user_id=?", (user_id,)).fetchone()[0]
+
+
+def digest_rows(user_id, now, end_of_day, idea_older_than):
+    """Rows for the morning digest: (overdue, due_today, one_old_idea_or_None).
+
+    Snoozed, done and archived items are left out. `end_of_day` is local midnight
+    (as UTC). The idea is the open idea created before `idea_older_than` that was
+    least recently shown, and not shown since `idea_older_than`."""
+    now_s, eod_s, old_s = to_str(now), to_str(end_of_day), to_str(idea_older_than)
+    awake = "status='open' AND (snoozed_until IS NULL OR snoozed_until<=?)"
+    with conn() as c:
+        overdue = c.execute(
+            f"SELECT * FROM items WHERE user_id=? AND {awake} AND due_at IS NOT NULL AND due_at<?"
+            " ORDER BY due_at, id",
+            (user_id, now_s, now_s),
+        ).fetchall()
+        today = c.execute(
+            f"SELECT * FROM items WHERE user_id=? AND {awake} AND due_at>=? AND due_at<?"
+            " ORDER BY due_at, id",
+            (user_id, now_s, now_s, eod_s),
+        ).fetchall()
+        idea = c.execute(
+            f"SELECT * FROM items WHERE user_id=? AND {awake} AND kind='idea' AND due_at IS NULL"
+            " AND created_at<=? AND (last_nudged_at IS NULL OR last_nudged_at<=?)"
+            " ORDER BY COALESCE(last_nudged_at, created_at), id LIMIT 1",
+            (user_id, now_s, old_s, old_s),
+        ).fetchone()
+    return overdue, today, idea
+
+
+def touch_nudged(item_id, user_id, now=None) -> None:
+    """Record that an item was shown (e.g. in the digest) without using the daily nudge cap."""
+    with conn() as c:
+        c.execute(
+            "UPDATE items SET last_nudged_at=?, nudge_count=nudge_count+1 WHERE id=? AND user_id=?",
+            (to_str(now or now_utc()), item_id, user_id),
+        )
 
 
 def mark_nudged(item_id, user_id, now=None) -> None:

@@ -224,6 +224,10 @@ Its prompt is `nanobot/templates/agent/consolidator_archive.md`. In short:
 
 ## 5. Design: daily digest
 
+> **Status: built** (`core.due_digests`, `core.build_digest`, `core.cmd_digest`, `db.digest_rows`,
+> `bot.digest_job`). One change from this design: with the digest on, stale ideas no longer get
+> separate nudges, because the digest already brings up one old idea a day.
+
 **Goal:** one morning message with what matters today, and silence when there's nothing to say.
 
 ### What's in it
@@ -288,6 +292,26 @@ Its prompt is `nanobot/templates/agent/consolidator_archive.md`. In short:
 ---
 
 ## 6. Design: memory upgrade (SQLite only)
+
+> **Status: search built** (`db.search_items`, `db.search_messages`, `items_fts`, `messages_fts`;
+> `core.chat` sends 150 open + 20 recently closed items, the last 30 messages, and up to 10
+> matching older items and 10 matching older messages). Changes from this design: the "never
+> cite an unknown id" check now looks ids up in the database (so citing a real old item found
+> by search is fine), and search terms use prefix matching ("birthday" finds "birthdays").
+> **Rolling summaries: built** (`summaries` table, `core.update_summary`, `llm.summarise`,
+> `bot.summary_job`, `/summary`). Differences from the design: a summary covers only messages
+> that have left the 30-message recent window, in batches of 20–100 (no separate idle trigger:
+> messages only leave the window when new ones arrive); the AI returns JSON lines rather than
+> free text, cleaned and capped in code; `/delete` of an item that came from chat discards the
+> summary so it is rebuilt without that text.
+>
+> **Profile facts: built** (`facts` table, `core.update_facts`, `llm.consolidate`, `bot.facts_job`,
+> `/facts`). Differences from the design: the run is once per local day after 03:30, catching up
+> later that day if the bot was off, and makes no AI call when nothing is new; the model can
+> also `retire` a fact (marked, never deleted); "ephemeral" facts retire after 30 days, as in
+> nanobot's tags; new notes and ideas are passed alongside the summary; `/facts delete` and
+> `/facts clear` let the user remove facts, and `/delete` of an item drops facts that share its
+> key words.
 
 **When it's needed:** each message currently sends up to 300 open + 50 closed items and the last
 100 messages. That's fine for months of use. It becomes slow and costly when there are more than

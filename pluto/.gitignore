@@ -1,6 +1,7 @@
 # secrets - never commit
 .env
 .env.*
+pluto.env
 !.env.example
 
 # local data
@@ -16,3 +17,8 @@ training/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Google service account keys, if one is ever placed here by mistake
+service-account*.json
+*-key.json
+*credentials*.json

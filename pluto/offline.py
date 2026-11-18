@@ -110,7 +110,34 @@ def choices() -> list:
     return []  # the offline stand-in has no models to choose from
 
 
-def respond(message: str, history: list, items: list, now_local: datetime, prefer=None) -> dict:
+def summarise(previous: str, messages: list, now_local: datetime, prefer=None) -> list:
+    """Rough stand-in for llm.summarise: keeps the person's substantive messages as lines."""
+    lines = [ln for ln in (previous or "").splitlines() if ln.strip()]
+    for m in messages:
+        text = m["text"].strip()
+        if m["role"] == "user" and len(_words(text)) >= 2 and not GREETINGS.match(text.lower()):
+            lines.append(f"- {text[:100]} ({m['when'][4:14]})")
+    return lines[-15:]
+
+
+def consolidate(facts: list, summary: str, notes: list, now_local: datetime, prefer=None) -> dict:
+    """Rough stand-in for llm.consolidate: summary lines and notes that mention a person or
+    a preference become facts, if not already there."""
+    have = {f["text"].lower() for f in facts}
+    cues = re.compile(r"\b(is my|my (wife|husband|mom|mother|dad|father|friend|boss|colleague|brother|sister)"
+                      r"|colleague|friend|birthday|prefer|like|love|hate|always|never|live|work)\b", re.I)
+    lines = [ln.lstrip("-• ").rsplit(" (", 1)[0] for ln in (summary or "").splitlines()]
+    lines += [n["title"] for n in notes]
+    add = []
+    for ln in lines:
+        if ln and cues.search(ln) and ln.lower() not in have:
+            have.add(ln.lower())
+            add.append({"text": ln[:200], "mark": "permanent" if "birthday" in ln.lower() else "durable"})
+    return {"add": add[:10], "update": [], "retire": []}
+
+
+def respond(message: str, history: list, items: list, now_local: datetime, prefer=None,
+            related=(), summary="", facts="") -> dict:
     text = message.strip()
     t = text.lower()
     last_pluto = next((m["text"] for m in reversed(history) if m["role"] == "pluto"), "")
@@ -167,7 +194,7 @@ def respond(message: str, history: list, items: list, now_local: datetime, prefe
     if t.endswith("?") or t.startswith(QUESTION_START):
         q = _words(text)
         hits = [i for i in items if q & _words(i["title"] + " " + i["original_text"])]
-        said = [m for m in history if m["role"] == "user" and q & _words(m["text"])]
+        said = [m for m in [*related, *history] if m["role"] == "user" and q & _words(m["text"])]
         if not hits and not said:
             return {"reply": "I don't have anything about that saved.", "save": [], "done": []}
         lines = [f"#{i['id']} {i['title']} ({i['bucket']})" for i in hits[-5:]]

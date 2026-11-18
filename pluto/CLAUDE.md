@@ -19,12 +19,14 @@ nudges until things are done. Read README.md for setup and behaviour.
    reply that cites an item id the user does not have is withheld (`core.chat`).
 3. **Ask before any outside action.** Pluto only ever messages its own user. It must not
    contact other people, post, buy, or call outside services beyond the AI providers
-   (Gemini, Groq, Z AI, NVIDIA) and transcription (Sarvam) without the user saying yes first. The same goes for
+   (Gemini, Groq, Z AI, NVIDIA), transcription (Sarvam) and the Google Sheet dashboard the
+   user set up themselves (Google Sheets API) without the user saying yes first. The same goes for
    anyone working on this repo: ask before pushing, deploying, creating repos, or
    sending anything to an external service.
-4. **Keys only in `.env`.** API keys and tokens live in `.env` (local) or the host's
-   environment variables (Railway). Never hard-code them, log them, put them in tests,
-   or commit `.env`. `.env.example` lists the names with empty values; add any new
+4. **Keys only in `pluto.env`.** API keys and tokens live in `pluto.env` (local; `.env`
+   is read only if it is missing; see `envfile.py`) or the host's environment variables
+   (Railway). Never hard-code them, log them, put them in tests, or commit `pluto.env`
+   or `.env`. `.env.example` lists the names with empty values; add any new
    key there and to `bot.KEY_REPORT` (a test checks they match).
 5. **If labelling fails, save it as a plain note.** Any error or malformed output from
    the assistant means: store the message as a `note` with the original text and tell
@@ -44,21 +46,64 @@ chat history; `/model` picks which AI provider goes first (saved per user, other
 stay as backup); `/export` returns items and conversation. A reminder's first alert
 always goes out at the time the user set (checked every minute), even at night and
 past the cap; repeat nudges and idea nudges wait out quiet hours (22:00–08:00) and are
-capped at 5 per user per 24 hours.
+capped at 5 per user per 24 hours. The morning digest (`core.due_digests`, `/digest`) is
+built from data with no AI call. It's sent at most once per local day, from the user's
+digest time until 4 h later, and skipped when there's nothing overdue, nothing due today
+and no idea to revisit. With the digest on, stale ideas appear only there, not as
+separate nudges. Digest items are marked shown with `db.touch_nudged`, which doesn't
+use the daily cap. Rolling summary (`core.update_summary`, `bot.summary_job`, `/summary`):
+messages older than the last `HISTORY_TURNS` (30) are folded, at least 20 at a time and at most 100, into one
+derived summary per user (`summaries` table, ≤15 lines / 1,500 chars). It's sent to the AI as
+background with every message. It never replaces `messages.text`; `/forget` deletes it;
+deleting an item whose words came from chat deletes it so it's rebuilt without them;
+on failure the old one stays and retries wait 10 min. Profile facts (`core.update_facts`,
+`llm.consolidate`, `bot.facts_job`, `/facts`): once per local day after 03:30, only when there's
+a new summary or new notes (else no AI call). The model proposes add/update/retire; core accepts
+only this user's active fact ids, cleans text (≤200 chars), skips duplicates, caps at 60.
+Automation never edits or deletes a fact: updates add a row and mark the old one `superseded`,
+retires mark it `retired`; "ephemeral" facts retire after 30 days. Only the user hard-deletes
+(`/facts delete`, `/facts clear`, `/forget`; `/delete <item>` drops facts sharing its key words).
+On failure nothing changes and it retries after 30 min.
+Topics (`items.topic`, `core.update_topics`, `llm.label_topics`, `bot.topics_job`, `/topic`): a derived
+life-area label per item. The assistant proposes one on save (`save[].topic`); the job labels items with
+none, 40 per AI call, accepting only ids from that batch (skipped ones get "Other"); retries after 10 min.
+`clean_topic`/`known_topic` tidy it and reuse the user's existing spelling. Never touches `original_text`.
 
 ## Layout
 
 - `core.py` — the whole flow (`chat`, commands, buttons, time buckets, nudge
-  selection). Transport-agnostic and synchronous. Put new behaviour here. The model
-  proposes (`reply`, `save`, `done`); core checks and applies.
+  selection, morning digest). Transport-agnostic and synchronous. Put new behaviour here. The model
+  proposes (`reply`, `save`, `done`, `reschedule`); core checks and applies (only the user's own
+  open items can be marked done or moved; a moved item's reminders start afresh).
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
-- `db.py` — SQLite. Every time-dependent function takes an optional `now`.
+  `watchdog.py` — exits the bot after 5 minutes without any answer from Telegram's
+  long poll, so the supervisor (launchd, Railway) restarts it.
+- `db.py` — SQLite. Every time-dependent function takes an optional `now`. Full-text
+  search: external-content FTS5 indexes `items_fts` and `messages_fts`, kept in step by
+  triggers (so `/delete` and `/forget` also clear search), `unicode61` without Porter
+  stemming (Hinglish), `search_terms()` drops English/Hinglish filler words, and every word is
+  quoted so user text can't break FTS5 syntax. If FTS5 is missing (`db.HAS_FTS = False`),
+  search falls back to `LIKE`. `core.chat` sends open items + recent closed + search hits
+  (items and older messages) instead of the whole history.
 - `llm.py` — the assistant (`respond`) and its system prompt. Tries Gemini → Groq →
   Z AI → NVIDIA Nemotron until one returns valid JSON (`PLUTO_PROVIDERS` sets the order); if all fail,
   core saves the raw note (rule 5).
   `offline.py` — rule-based stand-in for `simulate.py --offline`. Any object with
-  `respond(message, history, items, now_local)` works as the assistant.
+  `respond(message, history, items, now_local, prefer=None, related=())` works as the assistant.
 - `stt.py` — voice-to-text: Groq Whisper → Gemini → Sarvam, whichever keys exist.
+- `sheets.py` — one-way Google Sheet dashboard, two ways: an Apps Script web app the user
+  deploys in their sheet (`apps_script/Code.gs`, secret word required, only Pluto's four tabs)
+  or a service account (google-auth, already installed by google-genai). `core.sheet_tables()`
+  builds the rows and `core.sheet_styles()` a role per row (`SHEET_ROLES`: header, alert, group, …) plus
+  column widths; `apps_script/Code.gs` maps roles to colours (an old script ignores them).
+  `core.sync_sheet()` writes only when the content changed. No formula
+  injection from chat text: the API path writes `RAW`, the Apps Script path prefixes risky
+  cells with `'` (in Python and again in the script). Keys and the script secret live only in
+  `.env`; `.gitignore` also blocks common key file names. `python bot.py --dashboard-json`
+  prints the same tabs as JSON for updating a sheet through Claude (README, option C).
+- `mac/` — run as a macOS background app: `pluto.sh` (install/status/logs/restart/stop/uninstall,
+  bash 3.2 compatible) registers a launchd agent written by `make_plist.py` (RunAtLoad,
+  KeepAlive, optional `caffeinate -i`). It never reads `.env`; it only sets it to mode 600.
 - `export_training.py` — exports the stored chat as JSONL, reading `messages` read-only, so
   `/delete` and `/forget` stay "for good". Do not add a second copy of conversations that
   outlives them.
@@ -71,7 +116,7 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest                         # must pass before every commit
 python simulate.py --offline   # try the flow in the terminal, no keys needed
-python bot.py --check          # which keys are set in .env (never prints values)
+python bot.py --check          # which keys are set in pluto.env (never prints values)
 ```
 
 - Every rule above has a test; add one when you add behaviour.

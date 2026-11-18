@@ -191,3 +191,51 @@ def test_empty_message_does_nothing():
     replies, llm = chat("   ", says("?"))
     assert llm.calls == [] and items() == [] and db.recent_messages(UID) == []
     assert replies[0].text.startswith("I'm listening")
+
+
+# ---------- changing an item's time ----------
+
+def moved(reply, *moves):
+    return {"reply": reply, "save": [], "done": [], "reschedule": list(moves)}
+
+
+def test_reschedule_moves_the_time_and_restarts_reminders():
+    i = db.add_item(UID, "task", "Call the bank", "remind me to call the bank tomorrow at 5pm",
+                    "2026-11-03T11:30:00Z", now=NOW)
+    db.mark_nudged(i, UID, NOW)                                   # it had already reminded once
+    db.snooze(UID, i, now=NOW)
+    replies = core.chat(UID, "make it 6pm instead",
+                        FakeLLM(moved("Pakka", {"id": i, "due_local": "2026-11-03T18:00"})), now=NOW)
+    assert replies[0].text == f"Pakka\n🕕 Moved #{i} to Tue 03 Nov, 18:00."
+    item = db.get_item(UID, i)
+    assert item["due_at"] == "2026-11-03T12:30:00Z"
+    assert item["nudge_count"] == 0 and item["last_nudged_at"] is None and item["snoozed_until"] is None
+    assert item["original_text"] == "remind me to call the bank tomorrow at 5pm"
+    assert db.recall_pool(UID)[0]["id"] == i                      # no new item was saved
+
+
+def test_reschedule_can_remove_the_time():
+    i = db.add_item(UID, "task", "Call the bank", "call the bank", "2026-11-03T11:30:00Z", now=NOW)
+    replies = core.chat(UID, "no fixed time", FakeLLM(moved("Theek hai", {"id": i, "due_local": None})), now=NOW)
+    assert replies[0].text.endswith(f"🕕 #{i} no longer has a set time.")
+    assert db.get_item(UID, i)["due_at"] is None
+
+
+def test_reschedule_only_touches_the_users_open_items_and_readable_times():
+    mine = db.add_item(UID, "task", "Call the bank", "call the bank", "2026-11-03T11:30:00Z", now=NOW)
+    finished = db.add_item(UID, "task", "Old", "old", "2026-11-03T11:30:00Z", now=NOW)
+    db.set_status(UID, finished, "done")
+    theirs = db.add_item(OTHER, "task", "Theirs", "theirs", "2026-11-03T11:30:00Z", now=NOW)
+    replies = core.chat(UID, "move everything to 6", FakeLLM(moved(
+        "ok", {"id": mine, "due_local": "sometime soon"}, {"id": finished, "due_local": "2026-11-03T18:00"},
+        {"id": theirs, "due_local": "2026-11-03T18:00"}, {"id": "x"}, "junk")), now=NOW)
+    assert replies[0].text == "ok"
+    for uid, i in ((UID, mine), (UID, finished), (OTHER, theirs)):
+        assert db.get_item(uid, i)["due_at"] == "2026-11-03T11:30:00Z"
+
+
+def test_reschedule_missing_or_malformed_is_ignored():
+    i = db.add_item(UID, "task", "Call the bank", "call the bank", "2026-11-03T11:30:00Z", now=NOW)
+    out = {"reply": "hmm", "save": [], "done": [], "reschedule": "tomorrow"}
+    assert core.chat(UID, "hmm", FakeLLM(out), now=NOW)[0].text == "hmm"
+    assert db.get_item(UID, i)["due_at"] == "2026-11-03T11:30:00Z"
