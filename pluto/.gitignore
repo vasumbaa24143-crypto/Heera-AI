@@ -3,6 +3,9 @@
 .env.*
 pluto.env
 !.env.example
+service-account*.json
+*credentials*.json
+google-key*.json
 
 # local data
 *.db
