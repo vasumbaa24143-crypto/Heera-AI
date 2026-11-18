@@ -120,8 +120,24 @@ def summarise(previous: str, messages: list, now_local: datetime, prefer=None) -
     return lines[-15:]
 
 
+def consolidate(facts: list, summary: str, notes: list, now_local: datetime, prefer=None) -> dict:
+    """Rough stand-in for llm.consolidate: summary lines and notes that mention a person or
+    a preference become facts, if not already there."""
+    have = {f["text"].lower() for f in facts}
+    cues = re.compile(r"\b(is my|my (wife|husband|mom|mother|dad|father|friend|boss|colleague|brother|sister)"
+                      r"|colleague|friend|birthday|prefer|like|love|hate|always|never|live|work)\b", re.I)
+    lines = [ln.lstrip("-• ").rsplit(" (", 1)[0] for ln in (summary or "").splitlines()]
+    lines += [n["title"] for n in notes]
+    add = []
+    for ln in lines:
+        if ln and cues.search(ln) and ln.lower() not in have:
+            have.add(ln.lower())
+            add.append({"text": ln[:200], "mark": "permanent" if "birthday" in ln.lower() else "durable"})
+    return {"add": add[:10], "update": [], "retire": []}
+
+
 def respond(message: str, history: list, items: list, now_local: datetime, prefer=None,
-            related=(), summary="") -> dict:
+            related=(), summary="", facts="") -> dict:
     text = message.strip()
     t = text.lower()
     last_pluto = next((m["text"] for m in reversed(history) if m["role"] == "pluto"), "")

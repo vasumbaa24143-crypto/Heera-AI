@@ -53,7 +53,7 @@ def test_request_has_time_conversation_items_and_asks_for_json(gemini):
     g = gemini('{"reply": "Aaj passport renew karna hai (#1).", "save": [], "done": []}')
     history, items = context()
     out = llm.respond("aaj kya hai?", history, items, core.to_local(NOW))
-    assert out == {"reply": "Aaj passport renew karna hai (#1).", "save": [], "done": []}
+    assert out == {"reply": "Aaj passport renew karna hai (#1).", "save": [], "done": [], "reschedule": []}
     c = g.calls[0]
     assert "Current local time: Monday, 2026-11-02 12:00" in c.contents
     assert "[Mon 2026-11-02 12:00] User: hello" in c.contents
@@ -78,7 +78,7 @@ def test_prompt_carries_the_product_rules(gemini):
 
 def test_tolerates_code_fences_and_fills_defaults(gemini):
     gemini('```json\n{"reply": "ok"}\n```')
-    assert llm.respond("x", [], [], core.to_local(NOW)) == {"reply": "ok", "save": [], "done": []}
+    assert llm.respond("x", [], [], core.to_local(NOW)) == {"reply": "ok", "save": [], "done": [], "reschedule": []}
 
 
 def test_garbage_raises_so_core_saves_a_raw_note(gemini):
@@ -147,7 +147,7 @@ def test_gemini_failure_falls_back_to_groq(monkeypatch):
     monkeypatch.setattr(llm, "_post", http)
 
     out = llm.respond("hi", [], [], core.to_local(NOW))
-    assert out == {"reply": "Groq here", "save": [], "done": []}
+    assert out == {"reply": "Groq here", "save": [], "done": [], "reschedule": []}
     assert gem.calls == 1
     [call] = http.calls  # Z AI was not needed
     assert call.headers["Authorization"] == "Bearer test-groq-key"
@@ -239,3 +239,27 @@ def test_nvidia_appears_in_model_menu(monkeypatch):
     monkeypatch.setenv("NVIDIA_API_KEY", "n")
     assert ("nvidia", "NVIDIA Nemotron (nemotron-3.5-super-vl-120b-a12b)") in llm.choices()
     assert llm.providers("nvidia")[0] == "nvidia"
+
+
+def test_gemini_client_has_a_timeout(monkeypatch):
+    import sys
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, api_key, http_options=None):
+            seen["timeout_ms"] = http_options.timeout
+
+    monkeypatch.setattr(llm, "_client", None)
+    monkeypatch.setattr(sys.modules["google.genai"], "Client", FakeClient)
+    llm._c()
+    assert seen["timeout_ms"] == llm.TIMEOUT * 1000
+    monkeypatch.setattr(llm, "_client", None)
+
+
+def test_prompt_offers_reschedule_and_answer_gets_a_default(gemini):
+    g = gemini('{"reply": "ok"}')
+    out = llm.respond("make it 6pm", [], [], core.to_local(NOW))
+    assert out["reschedule"] == []
+    system = g.calls[0].config.system_instruction
+    assert '"reschedule"' in system and "Never say you\n  changed a time" in system
+    assert "same language and script as their NEW message" in system

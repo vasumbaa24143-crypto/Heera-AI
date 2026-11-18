@@ -24,7 +24,7 @@ You need Python 3.11 or newer.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # then fill in the values
+cp .env.example pluto.env # then fill in the values
 python bot.py --check     # shows which keys are set (never their values)
 python bot.py
 ```
@@ -34,11 +34,40 @@ python bot.py
    - "remind me kal shaam Rahul ko deck bhejna hai"
    - then ask: "aaj aur kal kya kya hai?" or "YouTube wala idea kya tha?"
 
+## Run it on a Mac in the background
+
+So you don't need a terminal window open:
+
+```bash
+cd ~/Heera-AI/pluto
+./mac/pluto.sh install --awake
+```
+
+This creates the Python environment if needed, installs the requirements, checks your `.env` (and creates it
+from the template the first time, then stops so you can fill it in), and registers Pluto as a background app
+that **starts when you log in and restarts itself if it stops**.
+
+| Command | What it does |
+|---|---|
+| `./mac/pluto.sh status` | Is it running? Shows the last log line. |
+| `./mac/pluto.sh logs` | Follow the log (Ctrl-C to stop watching). |
+| `./mac/pluto.sh restart` | Use after changing `.env` or pulling new code. |
+| `./mac/pluto.sh stop` / `start` | Pause and resume. |
+| `./mac/pluto.sh uninstall` | Remove the background app. Your data, `.env` and logs stay. |
+
+- `--awake` stops the Mac from idle-sleeping while Pluto runs (it uses macOS's own `caffeinate`). Leave it off
+  to let the Mac sleep normally; reminders then wait until it wakes.
+- **Closing the lid still puts a MacBook to sleep**, so reminders pause until you open it. Reminders due while it
+  slept arrive when it wakes, and the morning digest catches up within 4 hours. For truly always-on, deploy it (below).
+- Keep the `Heera-AI` folder in your home folder. macOS restricts background apps inside Documents, Desktop and Downloads.
+- Logs are in `~/Library/Logs/Pluto/pluto.log`. The background job is `~/Library/LaunchAgents/com.heeralal.pluto.plist`.
+- Don't also run `python bot.py` by hand while it's installed: two copies would fight over Telegram.
+
 ## Try it without Telegram
 
 ```bash
 python simulate.py --offline   # no keys, no network: simple built-in assistant
-python simulate.py             # same, but with your AI keys from .env
+python simulate.py             # same, but with your AI keys from pluto.env
 ```
 
 It runs the same flow as the bot (`core.py`) with its own `simulate.db`. Buttons appear as
@@ -53,9 +82,27 @@ pytest
 
 The tests use a fake assistant and fake Telegram objects, so they need no keys or network.
 
+## Training data
+
+Every message you send and every reply is already kept in `pluto.db`. To turn it into
+chat-style JSONL (for evaluating prompts or fine-tuning a model of your own):
+
+```bash
+python export_training.py --dry-run   # just the counts
+python export_training.py             # writes training/conversations.jsonl
+```
+
+It reads the database read-only, so anything you removed with `/delete` or `/forget` is
+not exported, and each run rewrites the file. The file is plain text on your machine
+(git-ignored) and holds your messages as you wrote them. Only keys in a few known formats
+(Google, Groq, NVIDIA, `sk-…` and Telegram bot tokens) are replaced with `[REDACTED_KEY]`;
+a key in any other format is not detected, so treat the file as private.
+This does not train the hosted models (Gemini, Groq, Z AI, NVIDIA); it is the data for a
+separate fine-tuning or evaluation step.
+
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/forget` (clear chat history and its summary) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/facts` (what Pluto knows about you; `/facts delete 3`, `/facts clear`) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/topic` (your topics; `/topic jobs`, `/topic 12 Money`) · `/forget` (clear chat history, its summary and profile facts) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
 
 ## Morning digest
 
@@ -86,10 +133,23 @@ One message each morning (08:30 by default, in `PLUTO_TZ`):
 ## Google Sheet dashboard (optional)
 
 Pluto can keep a Google Sheet up to date with four tabs:
-- **Dashboard:** overdue, due today, due this week, urgent, open to-dos, ideas, notes, and finished in the last 7 days.
-- **To-dos:** every open to-do and reminder, most urgent first, with priority, due date and your own words.
+- **Dashboard:** a one-line "start with…" headline; tiles for overdue, due today, this week, urgent, open
+  to-dos, ideas, notes and done in the last 7 days; **Focus now** (overdue, due today, urgent); **Coming up**
+  (next 7 days); **By topic**; **Recently saved**; **Recently finished**.
+- **To-dos:** every open to-do and reminder, most urgent first, with topic, priority, due date, status
+  ("⚠️ Overdue · 3 days", "📅 Today") and your own words. Overdue rows are red, today blue, urgent orange.
 - **Done:** finished and dropped items, with when.
-- **Notes & ideas:** everything else you saved.
+- **Notes & ideas:** everything else you saved, grouped by topic like a notebook.
+
+**Topics.** Every item gets a short topic (Jobs, Money, Content ideas, a project's name…) so the dashboard can
+group things. The assistant picks it when it saves the item, reusing your existing topics; a background job labels
+anything saved without one (older items, plain-note fallbacks) a batch at a time. Topics are derived labels: your own
+words are never changed. `/topic` lists them, `/topic jobs` shows one, `/topic 12 Money` moves an item.
+
+Colours, column widths, frozen headers and filters come from the Apps Script (option A). If you set up the sheet with
+an older copy of `Code.gs`, paste the new one over it (keep your secret word), save, then **Deploy → Manage
+deployments → edit (pencil) → Version: New version → Deploy**. The `/exec` link stays the same. Until then the sheet
+gets the new rows without the colours. The service account (option B) writes the values only.
 
 With option A or B, Pluto checks every 5 minutes and writes only when something changed. It's **one-way**: edits
 you make in the sheet are overwritten, so mark things done in Telegram. Text is always stored as plain text, so
@@ -179,18 +239,25 @@ If you use the key only for reading, `--check` and the start-up log also say `GO
 
 See `CLAUDE.md`. In short: your original message is stored untouched; if labelling fails it is still
 saved as a plain note; recall answers only from saved items; only `ALLOWED_USER_ID` can use the bot;
-keys live only in `.env`.
+keys live only in `pluto.env`.
 
 ## Deploy (later)
 
-`Procfile` has `worker: python bot.py` for Railway. Add the `.env` values as Railway variables,
+`Procfile` has `worker: python bot.py` for Railway. Add the `pluto.env` values as Railway variables,
 and mount a volume for the database (set `PLUTO_DB` to a path on the volume, e.g. `/data/pluto.db`).
 The bot must be running to nudge.
+
+If Telegram stops answering for 5 minutes (the network dropped and polling hung, as
+happened once), the bot logs `No answer from Telegram` and exits on purpose, so whatever
+runs it can start it again: Railway's restart policy, or on a Mac a launchd login item
+with `KeepAlive`. Messages sent meanwhile wait at Telegram (up to 24 hours) and arrive
+after the restart. Run by hand, it simply stops; start it again.
 
 ## Known limits
 
 - **Search:** each message sends the AI your open items (the 150 most urgent), the 20 most recently finished, and the last 30 chat messages. On top of that, it sends up to 10 older items and 10 older messages that contain the same words, found with SQLite's built-in full-text search (FTS5). So "what did we discuss about Goa?" reaches back to your very first message, while each message stays small. Search matches **words, not meaning**: "beach holiday" won't find "Goa trip", and Hindi in Devanagari won't match the same word typed in Latin letters. If your Python's SQLite lacks FTS5, Pluto falls back to a slower plain-text search.
 - **Rolling summary:** once 20 or more messages have scrolled out of the last 30, Pluto asks the AI (in the background, checked every minute) to fold them into a short summary of older chats: plans, people, decisions, preferences, at most 15 lines. Every reply gets that summary as background. `/summary` shows it, `/forget` clears it, and `/delete` throws it away so it's rebuilt without the deleted words. If the AI fails, the old summary stays and it tries again 10 minutes later. Your saved items and messages are never changed by this.
+- **Profile facts:** once a day after 03:30 (or as soon as the bot starts, if it was off), Pluto asks the AI to fold the latest summary and newly saved notes into a short list of lasting facts about you: people and how they relate to you, birthdays, preferences (including how you like replies), routines and goals. It's at most 60 facts, and no AI call is made if nothing is new. Every reply gets them as background. Corrections replace old facts, short-term ones ("busy with exams") expire after 30 days, and to-dos and sensitive details like passwords are kept out. `/facts` lists them, `/facts delete 3` or `/facts clear` removes them, `/forget` clears them with the chat, and `/delete` of an item also forgets facts that mention it.
 - Voice notes: Groq `whisper-large-v3` → Gemini → Sarvam `saarika:v2.5` (`STT_PROVIDERS` changes the order).
 - Reading Google Sheets: a question reads one tab (first 200 rows, columns A to Z).
 - AI providers are tried in order Gemini → Groq → Z AI → NVIDIA Nemotron (`PLUTO_PROVIDERS` changes it, and `/model` in chat picks which one goes first; the rest stay as backup). Default models: `gemini-2.5-flash`, `llama-3.3-70b-versatile` (Groq), `glm-4.6` (Z AI), `nvidia/nemotron-3.5-super-vl-120b-a12b` (NVIDIA, with thinking off for quick replies; `NVIDIA_THINKING=1` turns it on); change `PLUTO_MODEL`, `GROQ_MODEL`, `ZAI_MODEL`, `NVIDIA_MODEL` if a provider retires one. Fallback models may phrase replies differently, but the code-side checks (what gets saved, never citing unknown items) apply to all of them.

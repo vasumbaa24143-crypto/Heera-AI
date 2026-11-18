@@ -25,9 +25,10 @@ nudges until things are done. Read README.md for setup and behaviour.
    only, see `sheet_reader.py`) without the user saying yes first. The same goes for
    anyone working on this repo: ask before pushing, deploying, creating repos, or
    sending anything to an external service.
-4. **Keys only in `.env`.** API keys and tokens live in `.env` (local) or the host's
-   environment variables (Railway). Never hard-code them, log them, put them in tests,
-   or commit `.env`. `.env.example` lists the names with empty values; add any new
+4. **Keys only in `pluto.env`.** API keys and tokens live in `pluto.env` (local; `.env`
+   is read only if it is missing; see `envfile.py`) or the host's environment variables
+   (Railway). Never hard-code them, log them, put them in tests, or commit `pluto.env`
+   or `.env`. `.env.example` lists the names with empty values; add any new
    key there and to `bot.KEY_REPORT` (a test checks they match).
 5. **If labelling fails, save it as a plain note.** Any error or malformed output from
    the assistant means: store the message as a `note` with the original text and tell
@@ -57,7 +58,18 @@ messages older than the last `HISTORY_TURNS` (30) are folded, at least 20 at a t
 derived summary per user (`summaries` table, ≤15 lines / 1,500 chars). It's sent to the AI as
 background with every message. It never replaces `messages.text`; `/forget` deletes it;
 deleting an item whose words came from chat deletes it so it's rebuilt without them;
-on failure the old one stays and retries wait 10 min.
+on failure the old one stays and retries wait 10 min. Profile facts (`core.update_facts`,
+`llm.consolidate`, `bot.facts_job`, `/facts`): once per local day after 03:30, only when there's
+a new summary or new notes (else no AI call). The model proposes add/update/retire; core accepts
+only this user's active fact ids, cleans text (≤200 chars), skips duplicates, caps at 60.
+Automation never edits or deletes a fact: updates add a row and mark the old one `superseded`,
+retires mark it `retired`; "ephemeral" facts retire after 30 days. Only the user hard-deletes
+(`/facts delete`, `/facts clear`, `/forget`; `/delete <item>` drops facts sharing its key words).
+On failure nothing changes and it retries after 30 min.
+Topics (`items.topic`, `core.update_topics`, `llm.label_topics`, `bot.topics_job`, `/topic`): a derived
+life-area label per item. The assistant proposes one on save (`save[].topic`); the job labels items with
+none, 40 per AI call, accepting only ids from that batch (skipped ones get "Other"); retries after 10 min.
+`clean_topic`/`known_topic` tidy it and reuse the user's existing spelling. Never touches `original_text`.
 
 Reading a Google Sheet (`sheet_reader.py`) is optional and stays off until
 `GOOGLE_SERVICE_ACCOUNT_FILE` is set. The assistant may ask to read a sheet (`read`), but core
@@ -72,8 +84,11 @@ the other keys: keep it outside the repo.
 
 - `core.py` — the whole flow (`chat`, commands, buttons, time buckets, nudge
   selection, morning digest). Transport-agnostic and synchronous. Put new behaviour here. The model
-  proposes (`reply`, `save`, `done`, `read`); core checks and applies.
+  proposes (`reply`, `save`, `done`, `reschedule`, `read`); core checks and applies (only the
+  user's own open items can be marked done or moved; a moved item's reminders start afresh).
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
+  `watchdog.py` — exits the bot after 5 minutes without any answer from Telegram's
+  long poll, so the supervisor (launchd, Railway) restarts it.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`. Full-text
   search: external-content FTS5 indexes `items_fts` and `messages_fts`, kept in step by
   triggers (so `/delete` and `/forget` also clear search), `unicode61` without Porter
@@ -92,11 +107,19 @@ the other keys: keep it outside the repo.
 - `sheets.py` — one-way Google Sheet dashboard, two ways: an Apps Script web app the user
   deploys in their sheet (`apps_script/Code.gs`, secret word required, only Pluto's four tabs)
   or a service account (google-auth, already installed by google-genai). `core.sheet_tables()`
-  builds the rows; `core.sync_sheet()` writes only when the content changed. No formula
+  builds the rows and `core.sheet_styles()` a role per row (`SHEET_ROLES`: header, alert, group, …) plus
+  column widths; `apps_script/Code.gs` maps roles to colours (an old script ignores them).
+  `core.sync_sheet()` writes only when the content changed. No formula
   injection from chat text: the API path writes `RAW`, the Apps Script path prefixes risky
   cells with `'` (in Python and again in the script). Keys and the script secret live only in
   `.env`; `.gitignore` also blocks common key file names. `python bot.py --dashboard-json`
   prints the same tabs as JSON for updating a sheet through Claude (README, option C).
+- `mac/` — run as a macOS background app: `pluto.sh` (install/status/logs/restart/stop/uninstall,
+  bash 3.2 compatible) registers a launchd agent written by `make_plist.py` (RunAtLoad,
+  KeepAlive, optional `caffeinate -i`). It never reads `.env`; it only sets it to mode 600.
+- `export_training.py` — exports the stored chat as JSONL, reading `messages` read-only, so
+  `/delete` and `/forget` stay "for good". Do not add a second copy of conversations that
+  outlives them.
 - `tests/` — pytest with a fake assistant and fake Telegram objects; no network needed.
 
 ## Working on it
@@ -106,7 +129,7 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest                         # must pass before every commit
 python simulate.py --offline   # try the flow in the terminal, no keys needed
-python bot.py --check          # which keys are set in .env (never prints values)
+python bot.py --check          # which keys are set in pluto.env (never prints values)
 ```
 
 - Every rule above has a test; add one when you add behaviour.

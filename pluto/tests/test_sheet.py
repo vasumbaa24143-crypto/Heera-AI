@@ -25,9 +25,26 @@ def no_google_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def add(title, kind="task", due=None, priority="normal", text=None, uid=UID, created=NOW - D):
+def add(title, kind="task", due=None, priority="normal", text=None, uid=UID, created=NOW - D,
+        topic=None):
     return db.add_item(uid, kind, title, text or title, db.to_str(due) if due else None,
-                       now=created, priority=priority)
+                       now=created, priority=priority, topic=topic)
+
+
+def kpis(tables):
+    """The dashboard's number tiles as {label: value} (label rows are followed by value rows)."""
+    out, rows = {}, tables["Dashboard"]
+    for i, row in enumerate(rows[:-1]):
+        if isinstance(rows[i + 1][0], int) and isinstance(row[0], str) and row[0]:
+            out.update({k: v for k, v in zip(row, rows[i + 1]) if k})
+    return out
+
+
+def collect(into):
+    """A stand-in for sheets.push that records the tables it was given."""
+    def push(tables, styles=None):
+        into.append(tables)
+    return push
 
 
 # ---------- what's in the tabs ----------
@@ -47,18 +64,21 @@ def test_tabs_and_rows():
     assert list(t) == list(core.SHEET_TABS)
     todo_ids = [r[0] for r in t["To-dos"][1:]]
     assert todo_ids == [late, soon, remind_note, undated]     # overdue, today, later, no date
-    assert t["To-dos"][0] == ["ID", "To-do", "Type", "Priority", "Due", "When", "Added", "Your words"]
-    assert t["To-dos"][1] == [late, "Renew passport", "task", "high", "2026-11-01 12:00", "overdue",
-                              "2026-11-01 12:00", "Renew passport"]
-    assert [r[0] for r in t["Notes & ideas"][1:]] == [note, idea]
-    assert t["Done"][1][:5] == [fin, "Send deck", "task", "done", "2026-11-02 11:00"]
+    assert t["To-dos"][0] == ["#", "To-do", "Topic", "Priority", "Due", "Status", "Type", "Added",
+                              "Your words"]
+    assert t["To-dos"][1] == [late, "Renew passport", "", "🔴 High", "Sun 01 Nov, 12:00",
+                              "⚠️ Overdue · 1 day", "✅ Task", "Yesterday", "Renew passport"]
+    assert t["To-dos"][2][5] == "📅 Today" and t["To-dos"][4][4:6] == ["—", "No date"]
+    notes = [r[0] for r in t["Notes & ideas"][1:] if isinstance(r[0], int)]
+    assert notes == [note, idea]
+    assert t["Done"][1][:5] == [fin, "Send deck", "", "✅ Done", "Mon 02 Nov, 11:00"]
 
-    dash = dict((r[0], r[1]) for r in t["Dashboard"] if r[0])
+    dash = kpis(t)
     assert dash["⚠️ Overdue"] == 1 and dash["📅 Due today"] == 1
-    assert dash["🔴 Urgent (high priority)"] == 1 and dash["✅ Open to-dos"] == 4
-    assert dash["💡 Open ideas"] == 1 and dash["📝 Notes"] == 1
-    assert dash["🎉 Finished in the last 7 days"] == 1
-    assert dash["Last updated"] == "2026-11-02 12:00 (Asia/Kolkata)"
+    assert dash["🔴 Urgent"] == 1 and dash["✅ Open to-dos"] == 4
+    assert dash["💡 Ideas"] == 1 and dash["📝 Notes"] == 1
+    assert dash["🎉 Done (7 days)"] == 1
+    assert ["Last updated", "Mon 02 Nov, 12:00 (Asia/Kolkata)", "", "", ""] in t["Dashboard"]
 
 
 def test_finished_count_uses_when_it_was_closed():
@@ -66,8 +86,7 @@ def test_finished_count_uses_when_it_was_closed():
     db.set_status(UID, old, "done", now=NOW - 10 * D)
     dropped = add("dropped", kind="idea")
     db.set_status(UID, dropped, "archived", now=NOW)
-    dash = dict((r[0], r[1]) for r in core.sheet_tables(UID, NOW)["Dashboard"] if r[0])
-    assert dash["🎉 Finished in the last 7 days"] == 0
+    assert kpis(core.sheet_tables(UID, NOW))["🎉 Done (7 days)"] == 0
     assert db.get_item(UID, old)["closed_at"] == db.to_str(NOW - 10 * D)
     db.set_status(UID, old, "open")
     assert db.get_item(UID, old)["closed_at"] is None
@@ -84,11 +103,11 @@ def test_typed_formulas_stay_plain_text():
 def test_sync_only_when_something_changed():
     add("Call bank", due=NOW + 3 * H)
     pushed = []
-    assert core.sync_sheet(UID, pushed.append, now=NOW) == "synced"
-    assert core.sync_sheet(UID, pushed.append, now=NOW + timedelta(minutes=5)) == "unchanged"
+    assert core.sync_sheet(UID, collect(pushed), now=NOW) == "synced"
+    assert core.sync_sheet(UID, collect(pushed), now=NOW + timedelta(minutes=5)) == "unchanged"
     add("New thing")
-    assert core.sync_sheet(UID, pushed.append, now=NOW + timedelta(minutes=10)) == "synced"
-    assert core.sync_sheet(UID, pushed.append, now=NOW + timedelta(minutes=15), force=True) == "synced"
+    assert core.sync_sheet(UID, collect(pushed), now=NOW + timedelta(minutes=10)) == "synced"
+    assert core.sync_sheet(UID, collect(pushed), now=NOW + timedelta(minutes=15), force=True) == "synced"
     assert len(pushed) == 3
     assert db.get_setting(UID, "sheet_synced_at") == db.to_str(NOW + timedelta(minutes=15))
 
@@ -96,22 +115,22 @@ def test_sync_only_when_something_changed():
 def test_time_moving_on_counts_as_a_change():
     add("Call bank", due=NOW + 3 * H)
     pushed = []
-    core.sync_sheet(UID, pushed.append, now=NOW)
-    core.sync_sheet(UID, pushed.append, now=NOW + 4 * H)       # "today" became "overdue"
+    core.sync_sheet(UID, collect(pushed), now=NOW)
+    core.sync_sheet(UID, collect(pushed), now=NOW + 4 * H)     # "today" became "overdue"
     assert len(pushed) == 2
 
 
 def test_failure_is_recorded_and_retried():
     add("Call bank")
 
-    def broken(tables):
+    def broken(tables, styles=None):
         raise sheets.SheetError("Google Sheets 403: The caller does not have permission")
 
     with pytest.raises(sheets.SheetError):
         core.sync_sheet(UID, broken, now=NOW)
     assert db.get_setting(UID, "sheet_hash") is None
     assert "403" in db.get_setting(UID, "sheet_error")
-    assert core.sync_sheet(UID, lambda t: None, now=NOW) == "synced"
+    assert core.sync_sheet(UID, lambda t, s=None: None, now=NOW) == "synced"
     assert db.get_setting(UID, "sheet_error") == ""
 
 
@@ -226,7 +245,7 @@ def test_sheet_command_messages(configured):
 def test_sheet_job_does_nothing_when_not_set_up(monkeypatch):
     monkeypatch.delenv("GOOGLE_SHEETS_ID", raising=False)
     monkeypatch.setattr(bot, "ALLOWED", str(UID))
-    monkeypatch.setattr(sheets, "push", lambda t: (_ for _ in ()).throw(AssertionError("called")))
+    monkeypatch.setattr(sheets, "push", lambda t, s=None: (_ for _ in ()).throw(AssertionError("called")))
     asyncio.run(bot.sheet_job(SimpleNamespace()))
 
 
@@ -234,7 +253,7 @@ def test_sheet_job_syncs_the_allowed_user(configured, monkeypatch):
     monkeypatch.setattr(bot, "ALLOWED", str(UID))
     monkeypatch.setattr(db, "now_utc", lambda: NOW)
     pushed = []
-    monkeypatch.setattr(sheets, "push", pushed.append)
+    monkeypatch.setattr(sheets, "push", collect(pushed))
     add("Call bank")
     asyncio.run(bot.sheet_job(SimpleNamespace()))
     asyncio.run(bot.sheet_job(SimpleNamespace()))              # nothing changed: no second write
@@ -244,7 +263,7 @@ def test_sheet_job_syncs_the_allowed_user(configured, monkeypatch):
 def test_sheet_now_command_forces_a_sync(configured, monkeypatch):
     monkeypatch.setattr(bot, "ALLOWED", str(UID))
     pushed, sent = [], []
-    monkeypatch.setattr(sheets, "push", pushed.append)
+    monkeypatch.setattr(sheets, "push", collect(pushed))
 
     async def reply_text(text, **kw):
         sent.append(text)
@@ -309,7 +328,7 @@ def test_apps_script_push_sends_secret_and_safe_text(script):
     assert list(payload["tables"]) == list(core.SHEET_TABS)
     rows = payload["tables"]["To-dos"]
     risky = next(r for r in rows if "HYPERLINK" in str(r[1]))
-    assert risky[1] == "'=HYPERLINK(\"http://evil\")" and risky[7] == "'+cmd|calc"
+    assert risky[1] == "'=HYPERLINK(\"http://evil\")" and risky[8] == "'+cmd|calc"
     assert any(r[1] == "normal text" for r in rows)
     assert isinstance(rows[1][0], int)                       # numbers stay numbers
 
@@ -375,3 +394,78 @@ def test_dashboard_json_needs_the_allowed_user(monkeypatch):
     monkeypatch.setattr(bot, "ALLOWED", "")
     with pytest.raises(SystemExit, match="ALLOWED_USER_ID"):
         bot.dashboard_json()
+
+
+# ---------- the dashboard layout and its styles ----------
+
+def test_dashboard_tells_you_where_to_start():
+    late = add("Renew passport", due=NOW - 2 * D, topic="Admin")
+    urgent = add("Auré deployment", priority="high", topic="Auré")
+    add("Call bank", due=NOW + 2 * D, topic="Money")
+    add("Someday thing")
+    dash = core.sheet_tables(UID, NOW)["Dashboard"]
+    lead = dash[2][0]
+    assert lead == f"1 to-do is overdue. Start with #{urgent}: Auré deployment"
+    focus_at = next(i for i, r in enumerate(dash) if str(r[0]).startswith("🎯 Focus now"))
+    assert [r[4] for r in dash[focus_at + 2: focus_at + 4]] == [urgent, late]
+    soon_at = next(i for i, r in enumerate(dash) if str(r[0]).startswith("📅 Coming up"))
+    assert dash[soon_at + 2][:2] == ["Call bank", "💰 Money"]
+    topics_at = next(i for i, r in enumerate(dash) if r[0] == "🗂 By topic")
+    assert dash[topics_at + 1] == ["Topic", "Open to-dos", "Ideas", "Notes", "Done"]
+    labels = [r[0] for r in dash[topics_at + 2: topics_at + 6]]
+    assert labels[-1] == "⏳ Not sorted yet" and "💰 Money" in labels
+
+
+def test_dashboard_when_nothing_is_pressing():
+    add("Clean garage")
+    assert core.sheet_tables(UID, NOW)["Dashboard"][2][0] == \
+        "Nothing overdue or due today 🎉 1 open to-do when you're ready."
+    db.set_status(UID, 1, "done", now=NOW)
+    assert core.sheet_tables(UID, NOW)["Dashboard"][2][0] == "Your list is clear 🎉"
+
+
+def test_notes_are_grouped_by_topic():
+    add("Reel hook trick", kind="idea", topic="Content ideas")
+    add("Thumbnail idea", kind="idea", topic="Content ideas")
+    add("LinkedIn job link", kind="note", topic="Jobs")
+    add("Random thought", kind="note")
+    rows = core.sheet_tables(UID, NOW)["Notes & ideas"]
+    groups = [r[0] for r in rows if isinstance(r[0], str) and "·" in r[0]]
+    assert groups == ["🎬 Content ideas · 2", "💼 Jobs · 1", "⏳ Not sorted yet · 1"]
+    assert rows[2][:4] == [2, "Thumbnail idea", "💡 Idea", "🎬 Content ideas"]   # newest first
+
+
+def test_styles_match_the_rows():
+    add("Renew passport", due=NOW - D, priority="high")
+    add("Call bank", due=NOW + 3 * H, topic="Money")
+    add("YouTube tech news", kind="idea", topic="Content ideas")
+    fin = add("Send deck")
+    db.set_status(UID, fin, "done", now=NOW)
+    tables, styles = core.sheet_tables(UID, NOW), core.sheet_styles(UID, NOW)
+    assert list(styles) == list(tables)
+    for tab, rows in tables.items():
+        st = styles[tab]
+        assert len(st["roles"]) == len(rows), tab
+        assert set(st["roles"]) <= set(core.SHEET_ROLES), tab
+        assert len(st["widths"]) == max(len(r) for r in rows), tab
+        assert all(len(r) == len(rows[0]) for r in rows), tab   # every row is the same width
+    assert styles["To-dos"]["roles"] == ["header", "alert", "today"]
+    assert styles["Dashboard"]["roles"][:2] == ["title", "subtitle"]
+    assert "group" in styles["Notes & ideas"]["roles"]
+
+
+def test_apps_script_push_sends_the_styles(script):
+    add("Call bank", due=NOW + 3 * H)
+    core.sync_sheet(UID, sheets.push, now=NOW)
+    [payload] = script
+    assert payload["styles"]["To-dos"]["roles"] == ["header", "today"]
+    sheets.push(core.sheet_tables(UID, NOW))                    # without styles: values only
+    assert "styles" not in script[1]
+
+
+def test_apps_script_file_knows_every_role():
+    import pathlib
+    gs = (pathlib.Path(sheets.__file__).parent / "apps_script" / "Code.gs").read_text()
+    for role in core.SHEET_ROLES:
+        assert f"{role}:" in gs, role
+    assert "ROLES[role]" in gs                                 # unknown roles are ignored

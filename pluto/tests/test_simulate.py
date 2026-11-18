@@ -27,14 +27,18 @@ def test_scripted_session_offline(monkeypatch):
     assert s.handle("what about Goa?") == ["I don't have anything about that saved."]
     assert s.handle("thanks") == ["Anytime! 🙂"]
 
-    assert s.handle("/nudges") == ["(nothing to nudge right now)"]
+    first = s.handle("/nudges")          # the day's profile run picks up the birthday note
+    assert first == ["(profile facts updated: {'added': 1, 'updated': 0, 'retired': 0} — see /facts)"]
+    assert "Rahul ka birthday 5 March ko hai" in s.handle("/facts")[0]
+    assert s.handle("/nudges") == ["(nothing to nudge right now)"]   # once a day
     s.handle("/advance 2d")  # Wed 12:00; the 17:00 Tuesday reminder was missed meanwhile
     digest = "\n".join(s.handle("/nudges"))
     assert digest.startswith("☀️ Good morning!")
     assert "⚠️ Overdue (1)\n• #3 call Rahul (was due Tue 03 Nov, 17:00)" in digest
     assert s.handle("/nudges") == ["(nothing to nudge right now)"]  # covered by the digest
     assert s.handle("/tap done:3") == ["Done #3 ✅"]
-    assert s.handle("/delete 1") == ["Deleted #1 forever."]
+    assert s.handle("/delete 1") == ["Deleted #1 forever. Also forgot 1 profile fact about it."]
+    assert "don't have any profile facts" in s.handle("/facts")[0]
     assert s.handle("/forget")[0].startswith("Cleared our chat history")
     assert s.handle("/bogus")[0].startswith("Unknown command")
 

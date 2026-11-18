@@ -1,7 +1,7 @@
 """Chat with Pluto in the terminal: the same flow as the Telegram bot (core.py),
 without Telegram.
 
-    python simulate.py              # uses your AI keys from .env (Gemini, Groq, Z AI, NVIDIA)
+    python simulate.py              # uses your AI keys from pluto.env (Gemini, Groq, Z AI, NVIDIA)
     python simulate.py --offline    # simple built-in assistant, no network, no keys
 
 It uses its own database (simulate.db) so it never touches the bot's pluto.db.
@@ -14,9 +14,9 @@ import re
 import sys
 from datetime import timedelta
 
-from dotenv import load_dotenv
+import envfile
 
-load_dotenv()
+envfile.load()
 
 import core  # noqa: E402
 import db  # noqa: E402
@@ -30,6 +30,8 @@ something; ask "what's on my plate today?" or "what have we discussed about X?".
 /delete <id>       remove forever
 /model [name]      choose which AI thinks first (buttons, or e.g. /model groq)
 /summary           what Pluto remembers from older chats
+/facts [delete N|clear]  what Pluto knows about you (updated nightly after 03:30)
+/topic [name | <id> <name>]  your topics, one topic's items, or move an item
 /forget            clear the chat history and summary (items are kept)
 /export            print everything as JSON
 /tap <data>        press a button, e.g. /tap done:3
@@ -69,6 +71,10 @@ class Session:
             return render([core.cmd_delete(self.uid, arg)])
         if cmd == "/model":
             return render([core.cmd_model(self.uid, self.llm, arg)])
+        if cmd == "/facts":
+            return render([core.cmd_facts(self.uid, arg)])
+        if cmd == "/topic":
+            return render([core.cmd_topic(self.uid, arg)])
         if cmd == "/summary":
             return render([core.cmd_summary(self.uid)])
         if cmd == "/digest":
@@ -84,6 +90,9 @@ class Session:
             out = []
             if core.update_summary(self.uid, self.llm, now):
                 out.append("(older chat folded into the summary — see /summary)")
+            done = core.update_facts(self.uid, self.llm, now)
+            if done and any(done.values()):
+                out.append(f"(profile facts updated: {done} — see /facts)")
             for uid, reply, to_mark in core.due_digests([self.uid], now):
                 if reply is not None:
                     out += render([reply])
@@ -131,7 +140,7 @@ def main(argv=None) -> None:
         import llm
 
         if not llm.providers():
-            sys.exit(f"No AI key in .env ({llm.KEY_NAMES}). "
+            sys.exit(f"No AI key in pluto.env ({llm.KEY_NAMES}). "
                      "Fill one in, or run: python simulate.py --offline")
 
     db.DB_PATH = args.db

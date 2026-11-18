@@ -110,12 +110,16 @@ def service_account_email() -> str:
 
 # ---------- writing ----------
 
-def push(tables: dict) -> str:
-    """Write {tab: rows} to the sheet. Returns the sheet's URL ("" if unknown)."""
+def push(tables: dict, styles: dict = None) -> str:
+    """Write {tab: rows} to the sheet. Returns the sheet's URL ("" if unknown).
+
+    `styles` ({tab: {"roles": [...], "widths": [...], ...}}, from core.sheet_styles) is
+    applied by the Apps Script (colours, column widths, frozen header, filters). The
+    service-account path writes the values only."""
     if problem():
         raise SheetError(problem())
     if mode() == "apps_script":
-        return _push_apps_script(tables)
+        return _push_apps_script(tables, styles)
     _push_api(tables)
     return url()
 
@@ -143,10 +147,13 @@ def _post_script(payload):
                          "web app with access for 'Anyone'?") from None
 
 
-def _push_apps_script(tables) -> str:
+def _push_apps_script(tables, styles=None) -> str:
     safe = {t: [[as_text(v) for v in row] for row in rows] for t, rows in tables.items()}
+    payload = {"secret": script_secret(), "tables": safe}
+    if styles:
+        payload["styles"] = styles  # an older copy of the script just ignores this
     try:
-        out = _post_script({"secret": script_secret(), "tables": safe})
+        out = _post_script(payload)
     except httpx.HTTPError as e:
         raise SheetError(f"couldn't reach the Apps Script link ({type(e).__name__})") from None
     if not isinstance(out, dict) or not out.get("ok"):

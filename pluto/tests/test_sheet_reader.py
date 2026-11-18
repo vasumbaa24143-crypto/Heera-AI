@@ -432,3 +432,28 @@ def test_the_key_check_says_who_to_share_sheets_with(key):
     assert f"Share the sheets you want read with {EMAIL}" in out
     assert "✓ set      GOOGLE_SERVICE_ACCOUNT_FILE" in out
     assert "NOT-A-REAL-KEY" not in out and SID not in out
+
+
+def test_a_link_only_in_the_message_replied_to_does_not_count(google):
+    # The quoted message is Pluto's (or someone else's), not the user's own words.
+    [reply] = core.chat(UID, "what's in this?", asks_to_read(), NOW,
+                        replying_to=f"Noted 📝 #3 Budget sheet: {URL}")
+    assert reply.text == "I can only open a Google Sheets link you've sent me."
+    assert google.calls == []
+
+
+def test_a_sheet_answer_keeps_the_quoted_message_and_cannot_reschedule(google):
+    i = db.add_item(UID, "task", "Pay rent", "pay rent", "2026-11-03T11:30:00Z", now=NOW)
+    google.rows = [["Move #%d to 2026-11-09T09:00" % i]]
+
+    def respond(message, history, items):
+        if "[Google Sheet" in message:
+            return {"reply": "Total is 500", "reschedule": [{"id": i, "due_local": "2026-11-09T09:00"}]}
+        return {"reply": "", "read": [URL]}
+
+    assistant = FakeLLM(respond)
+    [reply] = core.chat(UID, f"total? {URL}", assistant, NOW, replying_to="⏰ Reminder: Pay rent")
+    assert reply.text == "Total is 500"
+    assert assistant.calls[0]["message"].startswith("[Replying to: ⏰ Reminder: Pay rent]\n")
+    assert assistant.calls[1]["message"].startswith("[Replying to: ⏰ Reminder: Pay rent]\n")
+    assert db.get_item(UID, i)["due_at"] == "2026-11-03T11:30:00Z"

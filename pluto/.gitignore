@@ -1,6 +1,7 @@
 # secrets - never commit
 .env
 .env.*
+pluto.env
 !.env.example
 service-account*.json
 *credentials*.json
@@ -9,6 +10,10 @@ google-key*.json
 # local data
 *.db
 *.db-journal
+
+# exported conversations (personal data, see export_training.py)
+training/
+*.jsonl
 
 # python
 .venv/
