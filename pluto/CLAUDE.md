@@ -63,12 +63,17 @@ Automation never edits or deletes a fact: updates add a row and mark the old one
 retires mark it `retired`; "ephemeral" facts retire after 30 days. Only the user hard-deletes
 (`/facts delete`, `/facts clear`, `/forget`; `/delete <item>` drops facts sharing its key words).
 On failure nothing changes and it retries after 30 min.
+Topics (`items.topic`, `core.update_topics`, `llm.label_topics`, `bot.topics_job`, `/topic`): a derived
+life-area label per item. The assistant proposes one on save (`save[].topic`); the job labels items with
+none, 40 per AI call, accepting only ids from that batch (skipped ones get "Other"); retries after 10 min.
+`clean_topic`/`known_topic` tidy it and reuse the user's existing spelling. Never touches `original_text`.
 
 ## Layout
 
 - `core.py` — the whole flow (`chat`, commands, buttons, time buckets, nudge
   selection, morning digest). Transport-agnostic and synchronous. Put new behaviour here. The model
-  proposes (`reply`, `save`, `done`); core checks and applies.
+  proposes (`reply`, `save`, `done`, `reschedule`); core checks and applies (only the user's own
+  open items can be marked done or moved; a moved item's reminders start afresh).
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`. Full-text
   search: external-content FTS5 indexes `items_fts` and `messages_fts`, kept in step by
@@ -86,7 +91,9 @@ On failure nothing changes and it retries after 30 min.
 - `sheets.py` — one-way Google Sheet dashboard, two ways: an Apps Script web app the user
   deploys in their sheet (`apps_script/Code.gs`, secret word required, only Pluto's four tabs)
   or a service account (google-auth, already installed by google-genai). `core.sheet_tables()`
-  builds the rows; `core.sync_sheet()` writes only when the content changed. No formula
+  builds the rows and `core.sheet_styles()` a role per row (`SHEET_ROLES`: header, alert, group, …) plus
+  column widths; `apps_script/Code.gs` maps roles to colours (an old script ignores them).
+  `core.sync_sheet()` writes only when the content changed. No formula
   injection from chat text: the API path writes `RAW`, the Apps Script path prefixes risky
   cells with `'` (in Python and again in the script). Keys and the script secret live only in
   `.env`; `.gitignore` also blocks common key file names. `python bot.py --dashboard-json`

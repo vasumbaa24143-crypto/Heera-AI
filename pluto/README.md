@@ -83,7 +83,7 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/facts` (what Pluto knows about you; `/facts delete 3`, `/facts clear`) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/forget` (clear chat history, its summary and profile facts) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/facts` (what Pluto knows about you; `/facts delete 3`, `/facts clear`) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/topic` (your topics; `/topic jobs`, `/topic 12 Money`) · `/forget` (clear chat history, its summary and profile facts) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
 
 ## Morning digest
 
@@ -114,10 +114,23 @@ One message each morning (08:30 by default, in `PLUTO_TZ`):
 ## Google Sheet dashboard (optional)
 
 Pluto can keep a Google Sheet up to date with four tabs:
-- **Dashboard:** overdue, due today, due this week, urgent, open to-dos, ideas, notes, and finished in the last 7 days.
-- **To-dos:** every open to-do and reminder, most urgent first, with priority, due date and your own words.
+- **Dashboard:** a one-line "start with…" headline; tiles for overdue, due today, this week, urgent, open
+  to-dos, ideas, notes and done in the last 7 days; **Focus now** (overdue, due today, urgent); **Coming up**
+  (next 7 days); **By topic**; **Recently saved**; **Recently finished**.
+- **To-dos:** every open to-do and reminder, most urgent first, with topic, priority, due date, status
+  ("⚠️ Overdue · 3 days", "📅 Today") and your own words. Overdue rows are red, today blue, urgent orange.
 - **Done:** finished and dropped items, with when.
-- **Notes & ideas:** everything else you saved.
+- **Notes & ideas:** everything else you saved, grouped by topic like a notebook.
+
+**Topics.** Every item gets a short topic (Jobs, Money, Content ideas, a project's name…) so the dashboard can
+group things. The assistant picks it when it saves the item, reusing your existing topics; a background job labels
+anything saved without one (older items, plain-note fallbacks) a batch at a time. Topics are derived labels: your own
+words are never changed. `/topic` lists them, `/topic jobs` shows one, `/topic 12 Money` moves an item.
+
+Colours, column widths, frozen headers and filters come from the Apps Script (option A). If you set up the sheet with
+an older copy of `Code.gs`, paste the new one over it (keep your secret word), save, then **Deploy → Manage
+deployments → edit (pencil) → Version: New version → Deploy**. The `/exec` link stays the same. Until then the sheet
+gets the new rows without the colours. The service account (option B) writes the values only.
 
 With option A or B, Pluto checks every 5 minutes and writes only when something changed. It's **one-way**: edits
 you make in the sheet are overwritten, so mark things done in Telegram. Text is always stored as plain text, so

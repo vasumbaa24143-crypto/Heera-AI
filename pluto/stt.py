@@ -71,7 +71,8 @@ async def _gemini(audio, filename, mime) -> str:
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=_key("gemini"))
+    # A timeout, so a stuck call moves on to the next provider instead of waiting forever.
+    client = genai.Client(api_key=_key("gemini"), http_options=types.HttpOptions(timeout=TIMEOUT * 1000))
     resp = await client.aio.models.generate_content(
         model=GEMINI_STT_MODEL,
         contents=[types.Part.from_bytes(data=audio, mime_type=mime.split(";")[0]), GEMINI_PROMPT],
