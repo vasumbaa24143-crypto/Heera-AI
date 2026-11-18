@@ -72,7 +72,8 @@ none, 40 per AI call, accepting only ids from that batch (skipped ones get "Othe
 
 - `core.py` — the whole flow (`chat`, commands, buttons, time buckets, nudge
   selection, morning digest). Transport-agnostic and synchronous. Put new behaviour here. The model
-  proposes (`reply`, `save`, `done`); core checks and applies.
+  proposes (`reply`, `save`, `done`, `reschedule`); core checks and applies (only the user's own
+  open items can be marked done or moved; a moved item's reminders start afresh).
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
 - `db.py` — SQLite. Every time-dependent function takes an optional `now`. Full-text
   search: external-content FTS5 indexes `items_fts` and `messages_fts`, kept in step by

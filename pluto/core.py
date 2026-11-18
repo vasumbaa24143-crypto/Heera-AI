@@ -186,12 +186,16 @@ def _normalize(result) -> dict:
     reply = result.get("reply") or ""
     save = result.get("save") or []
     done = result.get("done") or []
+    moves = result.get("reschedule") or []
     if not isinstance(reply, str) or not isinstance(save, list) or not isinstance(done, list):
         raise ValueError("assistant output has the wrong shape")
+    if not isinstance(moves, list):
+        moves = []
     return {
         "reply": reply.strip(),
         "save": [s for s in save if isinstance(s, dict)],
         "done": [i for i in (parse_id(d) for d in done) if i is not None],
+        "reschedule": [m for m in moves if isinstance(m, dict) and parse_id(m.get("id")) is not None],
     }
 
 
@@ -251,6 +255,18 @@ def chat(uid, text, llm, now=None) -> list:
     for i in dict.fromkeys(result["done"]):
         if i in open_ids and db.set_status(uid, i, "done"):
             done_lines.append(f"✅ Marked #{i} done.")
+
+    # Move only this user's open items, and only to a time that parses (or no time at all).
+    for m in result["reschedule"]:
+        i, when = parse_id(m.get("id")), m.get("due_local")
+        if i not in open_ids:
+            continue
+        due_utc = parse_due(when)
+        if when and due_utc is None:
+            continue  # a time we can't read: leave the item as it was
+        if db.reschedule(uid, i, due_utc):
+            done_lines.append(f"🕕 Moved #{i} to {fmt_due(due_utc)}." if due_utc
+                              else f"🕕 #{i} no longer has a set time.")
 
     # Save what the assistant decided to keep (information automatically;
     # tasks, promises and reminders only when the user asked for them).

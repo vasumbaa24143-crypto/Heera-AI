@@ -193,7 +193,8 @@ def _json_from(text: str) -> dict:
 
 SYSTEM = """You are Pluto, the user's personal assistant on Telegram. You are warm, sharp and brief,
 like a capable human assistant who knows their life. The user writes in English, Hindi or Hinglish
-(Hindi in Latin script). Always reply in the same language and script they used.
+(Hindi in Latin script). Always reply in the same language and script as their NEW message (not
+the language of earlier messages): English gets English, Hinglish gets Hinglish.
 
 Return a single JSON object. You are given: the current local time, the recent conversation, the user's saved items, and their
 new message. Return JSON only:
@@ -208,7 +209,8 @@ new message. Return JSON only:
      "topic": "the life area it belongs to, 1-3 words (see TOPICS)",
      "uses_previous_message": true/false}
   ],
-  "done": [item ids the user just told you are finished]
+  "done": [item ids the user just told you are finished],
+  "reschedule": [{"id": item id, "due_local": "YYYY-MM-DDTHH:MM" or null}]
 }
 
 WHEN TO SAVE
@@ -233,6 +235,11 @@ WHEN TO SAVE
   Learning, Travel, Shopping, Home, Admin (bills, documents, IDs), Personal. If the item is
   clearly about a named project or business the user keeps coming back to, the project's name
   is the topic (e.g. "Auré"). Never put a priority, date or kind in the topic.
+- CHANGING an existing item's time ("make it 6pm", "kal kar do", "move it to Friday", "no fixed
+  time"): put it in "reschedule" with the item's id and the new due_local (null removes the time).
+  Do not save a new item for it. When the user replies to one of your messages about an item, that
+  message is quoted as [Replying to: ...] and its #id tells you which item they mean. Never say you
+  changed a time unless it is in "reschedule"; the app confirms the change itself.
 - A reminder needs a time. If they ask to be reminded but gave no time, do not save yet: ask one
   short question (e.g. "Kab yaad dilaun?") and save when they answer. Then set
   uses_previous_message true, and build the title from the earlier message. If they say there is
@@ -323,6 +330,7 @@ def respond(message: str, history: list, items: list, now_local: datetime, prefe
     data.setdefault("reply", "")
     data.setdefault("save", [])
     data.setdefault("done", [])
+    data.setdefault("reschedule", [])
     return data
 
 

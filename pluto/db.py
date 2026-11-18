@@ -601,6 +601,18 @@ def delete_item(user_id, item_id) -> bool:
         return True
 
 
+def reschedule(user_id, item_id, due_at) -> bool:
+    """Give an open item a new due time (None = no time) and start its reminders afresh,
+    so the first alert goes out at the new time."""
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE items SET due_at=?, nudge_count=0, last_nudged_at=NULL, snoozed_until=NULL"
+            " WHERE id=? AND user_id=? AND status='open'",
+            (due_at, item_id, user_id),
+        )
+        return cur.rowcount > 0
+
+
 def snooze(user_id, item_id, hours=24, now=None) -> bool:
     until = to_str((now or now_utc()) + timedelta(hours=hours))
     with conn() as c:
