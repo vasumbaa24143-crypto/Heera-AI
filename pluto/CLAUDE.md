@@ -104,6 +104,9 @@ none, 40 per AI call, accepting only ids from that batch (skipped ones get "Othe
 - `mac/` — run as a macOS background app: `pluto.sh` (install/status/logs/restart/stop/uninstall,
   bash 3.2 compatible) registers a launchd agent written by `make_plist.py` (RunAtLoad,
   KeepAlive, optional `caffeinate -i`). It never reads `.env`; it only sets it to mode 600.
+- `export_training.py` — exports the stored chat as JSONL, reading `messages` read-only, so
+  `/delete` and `/forget` stay "for good". Do not add a second copy of conversations that
+  outlives them.
 - `tests/` — pytest with a fake assistant and fake Telegram objects; no network needed.
 
 ## Working on it

@@ -8,6 +8,10 @@ pluto.env
 *.db
 *.db-journal
 
+# exported conversations (personal data, see export_training.py)
+training/
+*.jsonl
+
 # python
 .venv/
 __pycache__/
