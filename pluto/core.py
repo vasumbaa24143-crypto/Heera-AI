@@ -46,6 +46,7 @@ PRIORITY_MARK = {"high": "🔴 ", "normal": "", "low": "⚪ "}
 TITLE_MAX = 120
 MAX_REPLY = 4000  # Telegram's limit is 4096 characters
 HISTORY_TURNS = 30   # most recent messages the assistant sees, word for word
+QUOTE_MAX = 2000      # characters of a replied-to message (or voice note transcript) passed along
 SEARCH_HITS = 10     # older items, and older messages, found by search for each message
 SUMMARY_BATCH_MIN = 20     # summarise once this many messages have left the recent window
 SUMMARY_BATCH_MAX = 100    # at most this many per summarising call
@@ -300,6 +301,8 @@ def chat(uid, text, llm, now=None, replying_to=None) -> list:
 
     message = text
     quoted = (replying_to or "").strip()
+    if len(quoted) > QUOTE_MAX:
+        quoted = quoted[:QUOTE_MAX].rstrip() + "…"
     if quoted:
         message = f"[Replying to: {quoted}]\n{text}"
     try:
