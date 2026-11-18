@@ -9,9 +9,9 @@ import logging
 import os
 import sys
 
-from dotenv import load_dotenv
+import envfile
 
-load_dotenv()
+envfile.load()
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
 from telegram.error import BadRequest, NetworkError  # noqa: E402
@@ -155,7 +155,7 @@ async def hear(update: Update, get_file, filename, mime, file_id=None) -> None:
         log.warning("transcription failed: %s", e)
         if not stt.providers():
             await message.reply_text(
-                f"I can't listen to voice notes yet: add one of {stt.KEY_NAMES} to .env "
+                f"I can't listen to voice notes yet: add one of {stt.KEY_NAMES} to pluto.env "
                 "and restart me. Meanwhile, please type it.")
             return
         if file_id:
@@ -393,7 +393,7 @@ def check_config() -> None:
         missing.append(f"an AI key ({llm.KEY_NAMES})")
     if missing:
         raise SystemExit(
-            f"Missing in .env: {', '.join(missing)}. Copy .env.example to .env and fill it in."
+            f"Missing in pluto.env: {', '.join(missing)}. Copy .env.example to pluto.env and fill it in."
         )
     if not ALLOWED.isdigit():
         raise SystemExit("ALLOWED_USER_ID must be your numeric Telegram id (ask @userinfobot).")
@@ -467,7 +467,7 @@ KEY_REPORT = [
 
 def key_report() -> str:
     """Which keys are set, without ever showing their values."""
-    lines = ["Keys in .env (values are never shown):"]
+    lines = ["Keys in pluto.env (values are never shown):"]
     for name, what, kind in KEY_REPORT:
         val = os.getenv(name) or (os.getenv("Z_AI_API_KEY") if name == "ZAI_API_KEY" else None)
         mark = "✓ set    " if val else ("✗ MISSING" if kind == "required" else "– not set")

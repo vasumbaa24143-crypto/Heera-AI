@@ -1,6 +1,7 @@
 # secrets - never commit
 .env
 .env.*
+pluto.env
 !.env.example
 
 # local data
