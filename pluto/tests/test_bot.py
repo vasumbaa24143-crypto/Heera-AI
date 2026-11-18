@@ -352,6 +352,68 @@ def test_replying_to_a_message_shows_it_to_the_assistant(monkeypatch):
     assert db.get_item(ME, i)["status"] == "done"
 
 
+def test_replying_to_a_voice_note_sends_its_transcript(monkeypatch):
+    llm = use_llm(monkeypatch, FakeLLM(says("Sure")))
+    heard = []
+
+    async def fake_transcribe(audio, filename, mime):
+        heard.append(audio)
+        return " kal 5 baje bank call karna hai "
+
+    monkeypatch.setattr(bot.stt, "transcribe", fake_transcribe)
+    u = update(text="Do this")
+    note = FakeVoice()
+    u.message.reply_to_message = SimpleNamespace(text=None, caption=None, voice=note, audio=None)
+    go(bot.on_text(u, ctx()))
+    assert heard == [b"OggS-fake-audio"] and note.attempts == 1
+    assert llm.calls[0]["message"] == "[Replying to: (voice note) kal 5 baje bank call karna hai]\nDo this"
+    assert db.recent_messages(ME)[0]["text"] == "Do this"   # stored as the user wrote it
+    assert [t for t, _ in u.message.replies] == ["Sure"]
+
+
+def test_replying_to_a_voice_note_that_cant_be_heard_still_says_so(monkeypatch):
+    llm = use_llm(monkeypatch, FakeLLM(says("Sorry")))
+
+    async def broken(audio, filename, mime):
+        raise bot.stt.TranscriptionFailed("all down")
+
+    monkeypatch.setattr(bot.stt, "transcribe", broken)
+    u = update(text="Transcription")
+    u.message.reply_to_message = SimpleNamespace(text=None, caption=None, voice=FakeVoice(), audio=None)
+    go(bot.on_text(u, ctx()))
+    assert llm.calls[0]["message"] == "[Replying to: (a voice note I couldn't listen to)]\nTranscription"
+
+
+def test_replying_to_a_voice_note_telegram_wont_hand_over(monkeypatch):
+    llm = use_llm(monkeypatch, FakeLLM(says("Sorry")))
+    u = update(text="what did I say")
+    note = FakeVoice(fail=[bot.BadRequest("File is too big")])
+    u.message.reply_to_message = SimpleNamespace(text=None, caption=None, voice=note, audio=None)
+    go(bot.on_text(u, ctx()))
+    assert llm.calls[0]["message"].startswith("[Replying to: (a voice note I couldn't listen to)]")
+
+
+def test_reply_context_other_kinds_of_quote():
+    plain = SimpleNamespace(reply_to_message=None, external_reply=None, quote=None)
+    assert go(bot.reply_context(plain)) is None
+    part = SimpleNamespace(quote=SimpleNamespace(text="only this bit"),
+                           reply_to_message=SimpleNamespace(text="a long message with only this bit"))
+    assert go(bot.reply_context(part)) == "only this bit"
+    other_chat = SimpleNamespace(reply_to_message=None,
+                                 external_reply=SimpleNamespace(text=None, caption="Flight at 9"))
+    assert go(bot.reply_context(other_chat)) == "Flight at 9"
+    photo = SimpleNamespace(reply_to_message=SimpleNamespace(text=None, caption=None, photo=("p",)))
+    assert go(bot.reply_context(photo)) == "(a photo with no text)"
+
+
+def test_a_long_quote_is_cut_short():
+    import core
+    fake = FakeLLM(says("ok"))
+    core.chat(ME, "summarise", fake, now=NOW, replying_to="x" * (core.QUOTE_MAX + 500))
+    sent = fake.calls[0]["message"]
+    assert sent.startswith("[Replying to: " + "x" * core.QUOTE_MAX + "…]")
+
+
 def test_a_plain_message_is_sent_as_is(monkeypatch):
     llm = use_llm(monkeypatch, FakeLLM(says("hi")))
     go(bot.on_text(update(text="hello"), ctx()))

@@ -95,20 +95,58 @@ async def typing(message) -> None:
         pass  # only a courtesy
 
 
+_NO_TEXT_KINDS = ("photo", "video", "video_note", "document", "sticker", "animation",
+                  "location", "contact", "poll")
+
+
+def _quoted(message):
+    """The message the user replied to: one in this chat, or one quoted from another chat."""
+    return getattr(message, "reply_to_message", None) or getattr(message, "external_reply", None)
+
+
 def quoted_text(message):
-    """The text of the message the user replied to (Telegram's "Reply"), if any."""
-    quoted = getattr(message, "reply_to_message", None)
+    """The text of the message the user replied to (Telegram's "Reply"), if any. When they
+    quoted only part of it, just that part."""
+    part = getattr(getattr(message, "quote", None), "text", None)
+    if part:
+        return part
+    quoted = _quoted(message)
     if quoted is None:
         return None
-    return quoted.text or getattr(quoted, "caption", None) or None
+    return getattr(quoted, "text", None) or getattr(quoted, "caption", None) or None
+
+
+async def reply_context(message):
+    """What the user is replying to, as text for the assistant. A quoted voice note or audio
+    file is transcribed; if that fails the assistant is still told what was quoted, so it
+    doesn't answer as if the user had said nothing."""
+    text = quoted_text(message)
+    if text:
+        return text
+    quoted = _quoted(message)
+    if quoted is None:
+        return None
+    v = getattr(quoted, "voice", None) or getattr(quoted, "audio", None)
+    if v is not None:
+        try:
+            audio = await fetch_audio(v.get_file)
+            heard = await stt.transcribe(audio, filename=getattr(v, "file_name", None) or "voice.ogg",
+                                         mime=getattr(v, "mime_type", None) or "audio/ogg")
+        except Exception as e:
+            log.warning("could not transcribe the voice note replied to (%s)", type(e).__name__)
+            return "(a voice note I couldn't listen to)"
+        return f"(voice note) {heard.strip()}" if heard and heard.strip() else "(a silent voice note)"
+    for kind in _NO_TEXT_KINDS:
+        if getattr(quoted, kind, None):
+            return f"(a {kind.replace('_', ' ')} with no text)"
+    return None
 
 
 async def handle_text(update: Update, text: str) -> None:
     uid = update.effective_user.id
     await typing(_msg(update))
-    replies = await asyncio.to_thread(
-        core.chat, uid, text, llm, replying_to=quoted_text(_msg(update))
-    )
+    quoted = await reply_context(_msg(update))
+    replies = await asyncio.to_thread(core.chat, uid, text, llm, replying_to=quoted)
     await send(_msg(update), replies)
 
 
