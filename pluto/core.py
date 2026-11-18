@@ -15,7 +15,10 @@ The code, not the model, decides what actually happens: actions are checked
 against the user's own items, saves are confirmed with real ids, and a reply
 that cites an item the user does not have is withheld.
 
-`llm` is any object with respond(message, history, items, now_local, prefer=None) -> dict,
+`llm` is any object with
+respond(message, history, items, now_local, prefer=None, related=(), summary="") -> dict,
+and (for rolling summaries) summarise(previous, messages, now_local, prefer=None) -> list,
+and (for profile facts) consolidate(facts, summary, notes, now_local, prefer=None) -> dict,
 and choices() -> [(name, label)] for the /model menu.
 (llm.py talks to Gemini; offline.py and the tests provide stand-ins.)
 """
@@ -38,7 +41,13 @@ ACTION_KINDS = ("task", "promise")  # created only when the user asks for them
 PRIORITY_MARK = {"high": "🔴 ", "normal": "", "low": "⚪ "}
 TITLE_MAX = 120
 MAX_REPLY = 4000  # Telegram's limit is 4096 characters
-HISTORY_TURNS = 100  # messages of conversation the assistant sees
+HISTORY_TURNS = 30   # most recent messages the assistant sees, word for word
+SEARCH_HITS = 10     # older items, and older messages, found by search for each message
+SUMMARY_BATCH_MIN = 20     # summarise once this many messages have left the recent window
+SUMMARY_BATCH_MAX = 100    # at most this many per summarising call
+SUMMARY_MAX_LINES = 15
+SUMMARY_MAX_CHARS = 1500
+SUMMARY_RETRY = timedelta(minutes=10)  # after a failed summary, wait before trying again
 
 START_TEXT = (
     "Hi, I'm Pluto 👋 Talk to me like you would to an assistant.\n\n"
@@ -52,6 +61,10 @@ START_TEXT = (
     "/list  open items · /done <id> · /snooze <id> (+1 day)\n"
     "/delete <id>  remove forever · /forget  clear our chat history\n"
     "/model  choose which AI thinks first\n"
+    "/summary  what I remember from older chats\n"
+    "/facts  what I know about you (people, preferences)\n"
+    "/topic  your topics (Jobs, Money, …) · /sheet  your Google Sheet dashboard\n"
+    "/digest  morning digest (on at 08:30; /digest now to preview)\n"
     "/export  download everything"
 )
 
@@ -125,6 +138,7 @@ def item_views(rows, now) -> list:
             "priority": r["priority"],
             "status": r["status"],
             "title": r["title"],
+            "topic": r["topic"],
             "original_text": r["original_text"],
             "saved_local": to_local(db.from_str(r["created_at"])).strftime("%a %Y-%m-%d %H:%M"),
             "due_local": to_local(db.from_str(r["due_at"])).strftime("%a %Y-%m-%d %H:%M")
@@ -172,12 +186,16 @@ def _normalize(result) -> dict:
     reply = result.get("reply") or ""
     save = result.get("save") or []
     done = result.get("done") or []
+    moves = result.get("reschedule") or []
     if not isinstance(reply, str) or not isinstance(save, list) or not isinstance(done, list):
         raise ValueError("assistant output has the wrong shape")
+    if not isinstance(moves, list):
+        moves = []
     return {
         "reply": reply.strip(),
         "save": [s for s in save if isinstance(s, dict)],
         "done": [i for i in (parse_id(d) for d in done) if i is not None],
+        "reschedule": [m for m in moves if isinstance(m, dict) and parse_id(m.get("id")) is not None],
     }
 
 
@@ -200,8 +218,11 @@ def _cited_ids(text) -> set:
     return {int(n) for n in re.findall(r"#(\d+)", text)}
 
 
-def chat(uid, text, llm, now=None) -> list:
-    """Handle one free-text message from the user and return Pluto's replies."""
+def chat(uid, text, llm, now=None, replying_to=None) -> list:
+    """Handle one free-text message from the user and return Pluto's replies.
+
+    replying_to is the text of the message the user replied to (e.g. a reminder), if any.
+    The assistant sees it; the stored message stays exactly as the user wrote it."""
     now = now or db.now_utc()
     text = (text or "").strip()
     if not text:
@@ -209,12 +230,23 @@ def chat(uid, text, llm, now=None) -> list:
 
     history = db.recent_messages(uid, HISTORY_TURNS)
     rows = db.context_items(uid)
+    # Search everything older for this message's words, so "what did we discuss about X"
+    # works however long ago it was, without sending the whole history every time.
+    rows = sorted(rows + db.search_items(uid, text, SEARCH_HITS, exclude_ids=[r["id"] for r in rows]),
+                  key=lambda r: r["id"])
+    oldest_recent = history[0]["id"] if history else None
+    related = db.search_messages(uid, text, SEARCH_HITS, before_id=oldest_recent) if history else []
     db.add_message(uid, "user", text, now=now)  # the user's words, kept as said
 
+    message = text
+    quoted = (replying_to or "").strip()
+    if quoted:
+        message = f"[Replying to: {quoted}]\n{text}"
     try:
         result = _normalize(
-            llm.respond(text, history_views(history), item_views(rows, now), to_local(now),
-                        prefer=db.get_setting(uid, "model"))
+            llm.respond(message, history_views(history), item_views(rows, now), to_local(now),
+                        prefer=db.get_setting(uid, "model"), related=history_views(related),
+                        summary=current_summary(uid), facts=profile_text(uid))
         )
     except Exception:
         # Never lose a thought: if the assistant fails, keep the message as a note.
@@ -223,7 +255,6 @@ def chat(uid, text, llm, now=None) -> list:
         db.add_message(uid, "pluto", reply.text, now=now)
         return [reply]
 
-    known_ids = {r["id"] for r in rows}
     open_ids = {r["id"] for r in rows if r["status"] == "open"}
 
     # Mark done only items that really are this user's open items.
@@ -231,6 +262,18 @@ def chat(uid, text, llm, now=None) -> list:
     for i in dict.fromkeys(result["done"]):
         if i in open_ids and db.set_status(uid, i, "done"):
             done_lines.append(f"✅ Marked #{i} done.")
+
+    # Move only this user's open items, and only to a time that parses (or no time at all).
+    for m in result["reschedule"]:
+        i, when = parse_id(m.get("id")), m.get("due_local")
+        if i not in open_ids:
+            continue
+        due_utc = parse_due(when)
+        if when and due_utc is None:
+            continue  # a time we can't read: leave the item as it was
+        if db.reschedule(uid, i, due_utc):
+            done_lines.append(f"🕕 Moved #{i} to {fmt_due(due_utc)}." if due_utc
+                              else f"🕕 #{i} no longer has a set time.")
 
     # Save what the assistant decided to keep (information automatically;
     # tasks, promises and reminders only when the user asked for them).
@@ -245,12 +288,15 @@ def chat(uid, text, llm, now=None) -> list:
         if it.get("uses_previous_message") is True and prev:
             original = f"{prev}\n{text}"  # e.g. "remind me to call Rahul" + "kal 5 baje"
         priority = it.get("priority") if it.get("priority") in db.PRIORITIES else "normal"
-        item_id = db.add_item(uid, kind, title, original, due_utc, now=now, priority=priority)
+        topic = known_topic(uid, clean_topic(it.get("topic")))
+        item_id = db.add_item(uid, kind, title, original, due_utc, now=now, priority=priority,
+                              topic=topic)
         saved.append(db.get_item(uid, item_id))
 
     # Never invent a memory: withhold a reply that cites items the user doesn't have.
     reply = result["reply"]
-    invented = _cited_ids(reply) - known_ids - {r["id"] for r in saved}
+    cited = _cited_ids(reply)
+    invented = cited - db.existing_item_ids(uid, cited) - {r["id"] for r in saved}
     if invented:
         log.warning("assistant cited unknown items %s; reply withheld", sorted(invented))
         reply = "I couldn't find that in what you've saved with me."
@@ -262,8 +308,9 @@ def chat(uid, text, llm, now=None) -> list:
     for r in saved:
         follow_up = r["kind"] in ACTION_KINDS or r["due_at"] is not None
         verb = "Added" if r["kind"] in ACTION_KINDS else "Noted"
+        tag = f"  ·  {topic_icon(r['topic'])} {r['topic']}" if r["topic"] else ""
         replies.append(
-            Reply(f"{verb} {item_line(r)}", item_buttons(r["id"]) if follow_up else [])
+            Reply(f"{verb} {item_line(r)}{tag}", item_buttons(r["id"]) if follow_up else [])
         )
     if not replies:
         replies.append(Reply("🙂"))
@@ -300,12 +347,19 @@ def cmd_delete(uid, arg) -> Reply:
     i = parse_id(arg)
     if i is None:
         return Reply("Usage: /delete <id>")
-    return Reply(f"Deleted #{i} forever." if db.delete_item(uid, i) else f"I can't find #{i}.")
+    row = db.get_item(uid, i)
+    if row is None or not db.delete_item(uid, i):
+        return Reply(f"I can't find #{i}.")
+    # Profile facts may have been built from it: drop the ones that mention it.
+    n = db.delete_facts_mentioning(uid, f"{row['title']} {row['original_text']}")
+    extra = f" Also forgot {n} profile fact{'s' if n != 1 else ''} about it." if n else ""
+    return Reply(f"Deleted #{i} forever.{extra}")
 
 
 def cmd_forget(uid) -> Reply:
     n = db.forget_messages(uid)
-    return Reply(f"Cleared our chat history ({n} messages). Your saved items are untouched.")
+    return Reply(f"Cleared our chat history ({n} messages), its summary and the profile facts "
+                 "built from it. Your saved items are untouched.")
 
 
 def cmd_model(uid, llm, arg=None) -> Reply:
@@ -347,7 +401,8 @@ def choose_model(uid, llm, name) -> Reply:
 
 def export_json(uid) -> str:
     return json.dumps(
-        {"items": db.export_all(uid), "messages": db.export_messages(uid)},
+        {"items": db.export_all(uid), "messages": db.export_messages(uid),
+         "summaries": db.export_summaries(uid), "facts": db.export_facts(uid)},
         ensure_ascii=False,
         indent=2,
     )
@@ -387,10 +442,13 @@ def due_nudges(now=None) -> list:
     A reminder's first alert goes out at the time the user asked for, even in
     quiet hours. Repeats and stale-idea nudges wait for daytime and respect the
     daily cap. The caller sends each one and then calls
-    db.mark_nudged(item_id, user_id, now), so a failed send is retried."""
+    record_nudge(user_id, item_id, reply, now), so a failed send is retried."""
     now = now or db.now_utc()
     out = []
-    for r, reason in db.pick_nudges(now, quiet=in_quiet_hours(now)):
+    # With the morning digest on, old ideas come up there (one a day), so they
+    # don't also get their own nudges.
+    no_digest = lambda uid: not digest_settings(uid)[0]  # noqa: E731
+    for r, reason in db.pick_nudges(now, quiet=in_quiet_hours(now), idea_nudges=no_digest):
         if reason == "reminder":
             reply = Reply(f"⏰ Reminder: {r['title']} (#{r['id']})", item_buttons(r["id"]))
         elif reason == "due":
@@ -404,3 +462,770 @@ def due_nudges(now=None) -> list:
             )
         out.append((r["user_id"], r["id"], reply))
     return out
+
+
+def record_nudge(uid, item_id, reply, now=None) -> None:
+    """After a nudge was sent: count it, and keep it in the chat so a reply like
+    "done already" can be matched to it."""
+    db.mark_nudged(item_id, uid, now)
+    db.add_message(uid, "pluto", reply.text, now=now)
+
+
+# ---------- daily digest ----------
+
+DIGEST_DEFAULT_TIME = "08:30"
+DIGEST_GRACE = timedelta(hours=4)    # if the bot was down at digest time, catch up within this
+DIGEST_MAX_PER_SECTION = 5
+DIGEST_IDEA_AFTER = timedelta(days=7)  # an idea must be this old, and not shown this recently
+_HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+
+def digest_settings(uid) -> tuple:
+    """(enabled, "HH:MM"). On by default."""
+    enabled = db.get_setting(uid, "digest_enabled", "on") != "off"
+    when = db.get_setting(uid, "digest_time", DIGEST_DEFAULT_TIME)
+    return enabled, when if _HHMM.match(when) else DIGEST_DEFAULT_TIME
+
+
+def _digest_start(uid, now):
+    """Today's digest time (local) for this user, as an aware datetime."""
+    _, when = digest_settings(uid)
+    h, m = (int(x) for x in when.split(":"))
+    return to_local(now).replace(hour=h, minute=m, second=0, microsecond=0)
+
+
+def _digest_content(uid, now):
+    """(Reply or None, ids to mark as shown). None means there's nothing worth saying."""
+    local = to_local(now)
+    end_of_day = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    overdue, today, idea = db.digest_rows(uid, now, end_of_day, now - DIGEST_IDEA_AFTER)
+    if not overdue and not today and idea is None:
+        return None, []
+
+    rank = {"high": 0, "normal": 1, "low": 2}
+    overdue = sorted(overdue, key=lambda r: (to_local(db.from_str(r["due_at"])).date(),
+                                             rank.get(r["priority"], 1), r["due_at"], r["id"]))
+
+    def section(title, rows, line):
+        out = [f"{title} ({len(rows)})"] + [line(r) for r in rows[:DIGEST_MAX_PER_SECTION]]
+        if len(rows) > DIGEST_MAX_PER_SECTION:
+            out.append(f"…and {len(rows) - DIGEST_MAX_PER_SECTION} more — /list")
+        return "\n".join(out)
+
+    def mark(r):
+        return PRIORITY_MARK.get(r["priority"], "") if r["kind"] in ACTION_KINDS else ""
+
+    def overdue_line(r):
+        return f"• #{r['id']} {mark(r)}{r['title']} (was due {fmt_due(r['due_at'])})"
+
+    def today_line(r):
+        return f"• #{r['id']} {mark(r)}{r['title']} — {to_local(db.from_str(r['due_at'])):%H:%M}"
+
+    parts = [f"☀️ Good morning! Here's your day ({local:%a %d %b}):"]
+    if overdue:
+        parts.append(section("⚠️ Overdue", overdue, overdue_line))
+    if today:
+        parts.append(section("📅 Today", today, today_line))
+    if idea is not None:
+        days = (now - db.from_str(idea["created_at"])).days
+        parts.append(f"💡 From a while back\n• #{idea['id']} {idea['title']} "
+                     f"(you told me {days} days ago). Still interested?")
+
+    shown = overdue[:DIGEST_MAX_PER_SECTION] + today[:DIGEST_MAX_PER_SECTION]
+    done_buttons = [(f"✅ #{r['id']}", f"done:{r['id']}") for r in shown]
+    rows = [done_buttons[i:i + 4] for i in range(0, len(done_buttons), 4)]
+    if idea is not None:
+        rows.append([("🗄 Drop idea", f"arc:{idea['id']}")])
+
+    # Overdue items and the idea count as nudged, so a repeat nudge doesn't follow
+    # an hour later. Items due later today are NOT marked: their own reminder
+    # still fires at the time the user set.
+    to_mark = [r["id"] for r in overdue[:DIGEST_MAX_PER_SECTION]]
+    if idea is not None:
+        to_mark.append(idea["id"])
+    return Reply(_short("\n\n".join(parts)), rows), to_mark
+
+
+def build_digest(uid, now=None):
+    """Today's digest as a Reply, or None when there's nothing to say. Changes nothing."""
+    return _digest_content(uid, now or db.now_utc())[0]
+
+
+def due_digests(user_ids, now=None) -> list:
+    """Digests to handle now, as (user_id, Reply or None, ids_to_mark).
+
+    Due once per local day, from the user's digest time until DIGEST_GRACE later
+    (so a bot that was down at 08:30 still sends at 09:10, but not at 15:00).
+    Reply None means "nothing to say": call digest_done() without sending.
+    After a successful send, call digest_done() so it isn't sent twice."""
+    now = now or db.now_utc()
+    today = to_local(now).date().isoformat()
+    out = []
+    for uid in user_ids:
+        enabled, _ = digest_settings(uid)
+        if not enabled or db.get_setting(uid, "digest_last_date") == today:
+            continue
+        if db.count_items(uid) == 0:
+            continue  # nothing saved yet: no empty "good morning"s
+        start = _digest_start(uid, now)
+        if to_local(now) < start:
+            continue
+        if to_local(now) >= start + DIGEST_GRACE:
+            out.append((uid, None, []))  # too late for a morning digest today
+            continue
+        reply, to_mark = _digest_content(uid, now)
+        out.append((uid, reply, to_mark))
+    return out
+
+
+def digest_done(uid, ids, now=None) -> None:
+    now = now or db.now_utc()
+    for item_id in ids:
+        db.touch_nudged(item_id, uid, now)
+    db.set_setting(uid, "digest_last_date", to_local(now).date().isoformat())
+
+
+def cmd_digest(uid, arg=None, now=None) -> Reply:
+    """/digest            show the setting
+    /digest now        preview today's digest (doesn't count as sent)
+    /digest on|off     turn it on or off
+    /digest 07:45      change the time"""
+    arg = (arg or "").strip().lower()
+    if arg == "now":
+        return build_digest(uid, now) or Reply("Nothing for today's digest: nothing overdue, "
+                                               "nothing due today, no old idea to revisit. 🎉")
+    if arg in ("on", "off"):
+        db.set_setting(uid, "digest_enabled", arg)
+        if arg == "off":
+            return Reply("Morning digest is off. /digest on to turn it back on.")
+        return Reply(f"Morning digest is on, at {digest_settings(uid)[1]} every day.")
+    if arg:
+        m = _HHMM.match(arg)
+        if not m:
+            return Reply("Usage: /digest, /digest now, /digest on|off, or /digest 07:45")
+        when = f"{int(m.group(1)):02d}:{m.group(2)}"
+        db.set_setting(uid, "digest_time", when)
+        db.set_setting(uid, "digest_enabled", "on")
+        return Reply(f"Done — your morning digest will come at {when}.")
+    enabled, when = digest_settings(uid)
+    state = f"on, at {when} every day" if enabled else "off"
+    return Reply(f"☀️ Morning digest is {state}. It lists what's overdue, what's due today and "
+                 "one old idea, and is skipped when there's nothing to say.\n"
+                 "/digest now to preview · /digest 07:45 to change the time · /digest off")
+
+
+
+# ---------- rolling summary of older conversation ----------
+
+def current_summary(uid) -> str:
+    row = db.latest_summary(uid)
+    return row["text"] if row else ""
+
+
+def _clean_summary(lines) -> str:
+    """Tidy the model's lines; raise ValueError if they're unusable (fail closed)."""
+    if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+        raise ValueError("summary lines must be strings")
+    out = []
+    for ln in lines:
+        ln = " ".join(ln.split())
+        if not ln or ln.lower().strip("-• ()") in ("nothing", "none"):
+            continue
+        out.append(ln if ln.startswith(("-", "•")) else f"- {ln}")
+    text = "\n".join(out[:SUMMARY_MAX_LINES])
+    if len(text) > SUMMARY_MAX_CHARS:  # cut at a line boundary
+        text = text[:SUMMARY_MAX_CHARS].rsplit("\n", 1)[0]
+    return text
+
+
+def update_summary(uid, llm, now=None, force=False) -> bool:
+    """Fold messages that have left the recent window into the rolling summary.
+
+    Runs when at least SUMMARY_BATCH_MIN such messages are waiting (any number with
+    force=True). On any failure nothing changes (the previous summary stays) and it waits
+    SUMMARY_RETRY before trying again. Returns True if a new summary was stored."""
+    now = now or db.now_utc()
+    if not hasattr(llm, "summarise"):
+        return False
+    retry_after = db.get_setting(uid, "summary_retry_after")
+    if retry_after and not force and db.to_str(now) < retry_after:
+        return False
+    rows, waiting = db.unsummarised_messages(uid, HISTORY_TURNS, SUMMARY_BATCH_MAX)
+    if not rows or (waiting < SUMMARY_BATCH_MIN and not force):
+        return False
+    prev = db.latest_summary(uid)
+    try:
+        lines = llm.summarise(prev["text"] if prev else "", history_views(rows), to_local(now),
+                              prefer=db.get_setting(uid, "model"))
+        text = _clean_summary(lines)
+    except Exception:
+        log.exception("summary failed; keeping the previous one")
+        db.set_setting(uid, "summary_retry_after", db.to_str(now + SUMMARY_RETRY))
+        return False
+    start = prev["from_msg_id"] if prev else rows[0]["id"]
+    db.add_summary(uid, start, rows[-1]["id"], text, now=now)
+    return True
+
+
+def cmd_summary(uid) -> Reply:
+    """/summary: what Pluto remembers about older chats (besides saved items)."""
+    text = current_summary(uid)
+    if not text:
+        return Reply("No summary yet. Once our chat grows past the last 30 messages, I keep a "
+                     "short summary of the older part here. Your saved items are kept separately "
+                     "(/list).")
+    return Reply("🧠 What I remember from our older chats:\n" + text +
+                 "\n\n/forget clears this and the chat history; saved items stay.")
+
+
+# ---------- topics: derived labels that group items on the dashboard ----------
+
+TOPIC_MAX = 30
+TOPICS_BATCH = 40                       # items labelled per AI call
+TOPICS_RETRY = timedelta(minutes=10)    # after a failed labelling call
+TOPIC_FALLBACK = "Other"                # for an item the model skipped, so it isn't asked forever
+_TOPIC_ICONS = (
+    (("job", "career", "interview", "resume", "hiring"), "💼"),
+    (("work", "office", "client", "meeting"), "🏢"),
+    (("content", "youtube", "video", "reel", "insta", "post", "creator"), "🎬"),
+    (("money", "finance", "invest", "stock", "bank", "tax", "share"), "💰"),
+    (("health", "fitness", "gym", "doctor", "medic"), "🩺"),
+    (("family", "friend", "people"), "👨‍👩‍👧"),
+    (("learn", "study", "course", "book", "read"), "📚"),
+    (("travel", "trip"), "✈️"),
+    (("shop", "buy"), "🛒"),
+    (("home", "house"), "🏠"),
+    (("admin", "document", "bill", "paperwork"), "🗂"),
+    (("idea",), "💡"),
+    (("personal", "self"), "🙂"),
+)
+
+
+def clean_topic(raw) -> str:
+    """A tidy topic label from the model ("" if unusable): one line, no leading #/emoji
+    punctuation, at most TOPIC_MAX characters, first letter capitalised."""
+    if not isinstance(raw, str):
+        return ""
+    t = re.sub(r"\s+", " ", raw).strip().strip("#*_`\"'“”‘’.:;,-– ").strip()
+    if not t or t.lower() in ("none", "null", "n/a", "misc", "general", "uncategorized"):
+        return ""
+    t = t[:TOPIC_MAX].strip()
+    return t[0].upper() + t[1:]
+
+
+def known_topic(uid, topic) -> str:
+    """Spell a topic the way this user's existing items already do (case-insensitive)."""
+    if not topic:
+        return ""
+    for name, _ in db.topic_counts(uid):
+        if name.lower() == topic.lower():
+            return name
+    return topic
+
+
+def topic_icon(topic) -> str:
+    t = (topic or "").lower()
+    for words, icon in _TOPIC_ICONS:
+        if any(w in t for w in words):
+            return icon
+    return "🏷"
+
+
+def update_topics(uid, llm, now=None, force=False) -> int:
+    """Label items that have no topic yet, TOPICS_BATCH at a time (one AI call). Only ids from
+    the batch are accepted, and only the derived `topic` changes. An item the model skips gets
+    TOPIC_FALLBACK. On failure nothing changes and it waits TOPICS_RETRY. Returns how many
+    items were labelled."""
+    now = now or db.now_utc()
+    if not hasattr(llm, "label_topics"):
+        return 0
+    retry_after = db.get_setting(uid, "topics_retry_after")
+    if retry_after and not force and db.to_str(now) < retry_after:
+        return 0
+    rows = db.unlabelled_items(uid, TOPICS_BATCH)
+    if not rows:
+        return 0
+    views = [{"id": r["id"], "kind": r["kind"], "title": r["title"],
+              "original_text": r["original_text"]} for r in rows]
+    try:
+        proposed = llm.label_topics(views, [t for t, _ in db.topic_counts(uid)], to_local(now),
+                                    prefer=db.get_setting(uid, "model"))
+    except Exception:
+        log.exception("topic labelling failed; will retry")
+        db.set_setting(uid, "topics_retry_after", db.to_str(now + TOPICS_RETRY))
+        return 0
+    wanted = {r["id"] for r in rows}
+    labelled = {}
+    for p in proposed if isinstance(proposed, list) else []:
+        if not isinstance(p, dict):
+            continue
+        item_id, topic = parse_id(p.get("id")), clean_topic(p.get("topic"))
+        if item_id in wanted and item_id not in labelled and topic:
+            labelled[item_id] = known_topic(uid, topic)
+            db.set_topic(uid, item_id, labelled[item_id])
+    for item_id in wanted - set(labelled):
+        db.set_topic(uid, item_id, TOPIC_FALLBACK)
+    db.set_setting(uid, "topics_retry_after", "")
+    return len(wanted)
+
+
+def cmd_topic(uid, arg=None) -> Reply:
+    """/topic: list topics · /topic <name>: items in it · /topic <id> <name>: relabel an item."""
+    arg = (arg or "").strip()
+    if not arg:
+        counts = db.topic_counts(uid)
+        if not counts:
+            return Reply("🏷 No topics yet. I label what you save (Jobs, Money, Content ideas, …) "
+                         "so your dashboard can group it.")
+        lines = [f"{topic_icon(t)} {t} · {n}" for t, n in counts]
+        return Reply("🏷 Your topics:\n" + "\n".join(lines) +
+                     "\n\n/topic <name> shows one · /topic <id> <name> moves an item")
+    first, _, rest = arg.partition(" ")
+    item_id = parse_id(first)
+    if item_id is not None and rest.strip():
+        topic = known_topic(uid, clean_topic(rest))
+        if not topic:
+            return Reply("Give me a short topic name, e.g. /topic 12 Jobs")
+        if not db.set_topic(uid, item_id, topic):
+            return Reply(f"I couldn't find #{item_id}.")
+        return Reply(f"🏷 #{item_id} is now under {topic_icon(topic)} {topic}.")
+    rows = db.items_in_topic(uid, arg)
+    if not rows:
+        return Reply(f"Nothing under “{arg}”. /topic lists your topics.")
+    name = rows[0]["topic"]
+    shown = [item_line(r) + ("" if r["status"] == "open" else f" ({r['status']})") for r in rows]
+    return Reply(f"{topic_icon(name)} {name}\n" + "\n".join(shown))
+
+
+# ---------- Google Sheet dashboard (data only; sheets.py does the Google calls) ----------
+
+SHEET_TABS = ("Dashboard", "To-dos", "Done", "Notes & ideas")
+_BUCKET_ORDER = ["overdue", "today", "tomorrow", "this week", "this month", "later", "no date"]
+_PRIORITY_RANK = {"high": 0, "normal": 1, "low": 2}
+KIND_LABEL = {"task": "✅ Task", "promise": "🤝 Promise", "idea": "💡 Idea", "note": "📝 Note"}
+PRIORITY_LABEL = {"high": "🔴 High", "normal": "Normal", "low": "⚪ Low"}
+SHEET_FOCUS_MAX = 8      # rows in each dashboard list
+SHEET_RECENT_MAX = 6
+SHEET_SOON_DAYS = 7
+UNSORTED = "Not sorted yet"
+# How each row should look; apps_script/Code.gs maps these names to colours and fonts.
+SHEET_ROLES = ("title", "subtitle", "lead", "blank", "kpi_label", "kpi_value", "section",
+               "header", "row", "alert", "today", "urgent", "done", "group", "note")
+
+
+def _local_str(utc_s):
+    return to_local(db.from_str(utc_s)).strftime("%Y-%m-%d %H:%M") if utc_s else ""
+
+
+def _span(delta) -> str:
+    mins = int(delta.total_seconds() // 60)
+    if mins < 60:
+        return f"{max(mins, 1)} min"
+    if mins < 24 * 60:
+        return f"{mins // 60} h"
+    days = mins // (24 * 60)
+    return f"{days} day{'s' if days != 1 else ''}"
+
+
+def _due_status(r, now) -> str:
+    b = r["_bucket"]
+    if b == "overdue":
+        return f"⚠️ Overdue · {_span(now - db.from_str(r['due_at']))}"
+    return {"today": "📅 Today", "no date": "No date"}.get(b, b.capitalize())
+
+
+def _saved_when(utc_s, now) -> str:
+    """'Today', 'Yesterday', '3 days ago', or the date."""
+    if not utc_s:
+        return ""
+    d, n = to_local(db.from_str(utc_s)).date(), to_local(now).date()
+    days = (n - d).days
+    if days <= 0:
+        return "Today"
+    if days == 1:
+        return "Yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    return to_local(db.from_str(utc_s)).strftime("%a %d %b")
+
+
+def _topic_cell(r) -> str:
+    return f"{topic_icon(r['topic'])} {r['topic']}" if r["topic"] else ""
+
+
+def _todo_role(r) -> str:
+    if r["_bucket"] == "overdue":
+        return "alert"
+    if r["_bucket"] == "today":
+        return "today"
+    return "urgent" if r["priority"] == "high" else "row"
+
+
+def _sheet(uid, now):
+    """Build every tab: ({tab: rows}, {tab: style}). Rows hold only plain text and numbers;
+    sheets.py writes them as RAW values (or the script marks risky text), so text the user
+    typed (e.g. starting with "=") can never become a spreadsheet formula."""
+    rows = db.export_all(uid)
+    is_todo = lambda r: r["kind"] in ACTION_KINDS or r["due_at"]  # noqa: E731
+    todos = [r for r in rows if r["status"] == "open" and is_todo(r)]
+    notes = [r for r in rows if r["status"] == "open" and not is_todo(r)]
+    done = [r for r in rows if r["status"] != "open"]
+
+    for r in todos:
+        r["_bucket"] = bucket(r["due_at"], now)
+    todos.sort(key=lambda r: (_BUCKET_ORDER.index(r["_bucket"]), r["due_at"] or "9999",
+                              _PRIORITY_RANK.get(r["priority"], 1), r["id"]))
+    done.sort(key=lambda r: (r["closed_at"] or "", r["id"]), reverse=True)
+
+    def count(pred):
+        return sum(1 for r in todos if pred(r))
+
+    week = {"overdue", "today", "tomorrow", "this week"}
+    week_ago = db.to_str(now - timedelta(days=7))
+    local = to_local(now)
+    overdue = count(lambda r: r["_bucket"] == "overdue")
+    today = count(lambda r: r["_bucket"] == "today")
+    focus = [r for r in todos if r["_bucket"] in ("overdue", "today") or r["priority"] == "high"]
+    focus.sort(key=lambda r: (_PRIORITY_RANK.get(r["priority"], 1),
+                              _BUCKET_ORDER.index(r["_bucket"]), r["due_at"] or "9999", r["id"]))
+    soon_end = db.to_str(now + timedelta(days=SHEET_SOON_DAYS))
+    soon = [r for r in todos if r["_bucket"] not in ("overdue", "today", "no date")
+            and r["due_at"] <= soon_end and r not in focus]
+
+    # A one-line headline, like an assistant would say it.
+    parts = []
+    if overdue:
+        parts.append(f"{overdue} to-do{'s are' if overdue != 1 else ' is'} overdue")
+    if today:
+        parts.append(f"{today} due today")
+    if focus:
+        lead = (" and ".join(parts) + ". " if parts else "") + f"Start with #{focus[0]['id']}: {focus[0]['title']}"
+    elif todos:
+        lead = f"Nothing overdue or due today 🎉 {len(todos)} open to-do{'s' if len(todos) != 1 else ''} when you're ready."
+    else:
+        lead = "Your list is clear 🎉"
+
+    W = 5
+    dash, roles = [], []
+
+    def put(row, role):
+        dash.append(list(row) + [""] * (W - len(row)))
+        roles.append(role)
+
+    def todo_list(items, empty):
+        put(["To-do", "Topic", "Due", "Status", "#"], "header")
+        for r in items[:SHEET_FOCUS_MAX]:
+            put([r["title"], _topic_cell(r), fmt_due(r["due_at"]) or "—", _due_status(r, now), r["id"]],
+                _todo_role(r))
+        if not items:
+            put([empty], "note")
+        elif len(items) > SHEET_FOCUS_MAX:
+            put([f"+ {len(items) - SHEET_FOCUS_MAX} more in the To-dos tab"], "note")
+
+    put(["📊 Your dashboard"], "title")
+    put(["Last updated", f"{local:%a %d %b, %H:%M} ({TZ.key})"], "subtitle")
+    put([lead], "lead")
+    put([], "blank")
+    put(["⚠️ Overdue", "📅 Due today", "🗓 This week", "🔴 Urgent"], "kpi_label")
+    put([overdue, today, count(lambda r: r["_bucket"] in week),
+         count(lambda r: r["priority"] == "high")], "kpi_value")
+    put(["✅ Open to-dos", "💡 Ideas", "📝 Notes", "🎉 Done (7 days)"], "kpi_label")
+    put([len(todos), sum(1 for r in notes if r["kind"] == "idea"),
+         sum(1 for r in notes if r["kind"] != "idea"),
+         sum(1 for r in done if r["status"] == "done" and (r["closed_at"] or "") >= week_ago)],
+        "kpi_value")
+    put([], "blank")
+    put(["🎯 Focus now · overdue, due today and urgent"], "section")
+    todo_list(focus, "Nothing urgent right now 🙌")
+    put([], "blank")
+    put([f"📅 Coming up · next {SHEET_SOON_DAYS} days"], "section")
+    todo_list(soon, "Nothing scheduled this week.")
+    put([], "blank")
+
+    by_topic = {}
+    for r in rows:
+        t = by_topic.setdefault(r["topic"] or UNSORTED, {"todo": 0, "idea": 0, "note": 0, "done": 0})
+        if r["status"] != "open":
+            t["done"] += 1
+        elif is_todo(r):
+            t["todo"] += 1
+        else:
+            t["idea" if r["kind"] == "idea" else "note"] += 1
+    put(["🗂 By topic"], "section")
+    put(["Topic", "Open to-dos", "Ideas", "Notes", "Done"], "header")
+    order = sorted(by_topic, key=lambda t: (t == UNSORTED, -sum(by_topic[t].values()), t.lower()))
+    for t in order:
+        c = by_topic[t]
+        label = f"{topic_icon(t)} {t}" if t != UNSORTED else f"⏳ {UNSORTED}"
+        put([label, c["todo"], c["idea"], c["note"], c["done"]], "row")
+    if not order:
+        put(["Nothing saved yet."], "note")
+    put([], "blank")
+
+    put(["🆕 Recently saved"], "section")
+    put(["What", "Topic", "Type", "Saved", "#"], "header")
+    for r in sorted(rows, key=lambda r: -r["id"])[:SHEET_RECENT_MAX]:
+        put([r["title"], _topic_cell(r), KIND_LABEL.get(r["kind"], r["kind"]),
+             _saved_when(r["created_at"], now), r["id"]], "row" if r["status"] == "open" else "done")
+    if not rows:
+        put(["Nothing saved yet."], "note")
+    put([], "blank")
+
+    put(["✅ Recently finished"], "section")
+    put(["Item", "Topic", "Result", "Finished", "#"], "header")
+    for r in done[:SHEET_RECENT_MAX]:
+        put([r["title"], _topic_cell(r), "✅ Done" if r["status"] == "done" else "🗄 Dropped",
+             _saved_when(r["closed_at"], now) or "—", r["id"]], "done")
+    if not done:
+        put(["Nothing finished yet."], "note")
+    put([], "blank")
+    put(["Updated automatically from your Telegram chat. Edits here are overwritten; change things in Telegram "
+         "(/done, /snooze, /topic)."], "note")
+
+    todo_rows = [["#", "To-do", "Topic", "Priority", "Due", "Status", "Type", "Added", "Your words"]] + [
+        [r["id"], r["title"], _topic_cell(r), PRIORITY_LABEL.get(r["priority"], r["priority"]),
+         fmt_due(r["due_at"]) or "—", _due_status(r, now), KIND_LABEL.get(r["kind"], r["kind"]),
+         _saved_when(r["created_at"], now), r["original_text"]] for r in todos]
+
+    done_rows = [["#", "Item", "Topic", "Result", "Finished", "Type", "Added"]] + [
+        [r["id"], r["title"], _topic_cell(r), "✅ Done" if r["status"] == "done" else "🗄 Dropped",
+         fmt_due(r["closed_at"]) or "—", KIND_LABEL.get(r["kind"], r["kind"]),
+         _saved_when(r["created_at"], now)] for r in done]
+
+    # Notes and ideas read like a notebook: grouped by topic, biggest topic first.
+    groups = {}
+    for r in notes:
+        groups.setdefault(r["topic"] or UNSORTED, []).append(r)
+    note_rows, note_roles = [["#", "Note / idea", "Type", "Topic", "Saved", "Your words"]], ["header"]
+    for t in sorted(groups, key=lambda t: (t == UNSORTED, -len(groups[t]), t.lower())):
+        items = sorted(groups[t], key=lambda r: -r["id"])
+        icon = topic_icon(t) if t != UNSORTED else "⏳"
+        note_rows.append([f"{icon} {t} · {len(items)}", "", "", "", "", ""])
+        note_roles.append("group")
+        for r in items:
+            note_rows.append([r["id"], r["title"], KIND_LABEL.get(r["kind"], r["kind"]),
+                              _topic_cell(r), _saved_when(r["created_at"], now), r["original_text"]])
+            note_roles.append("row")
+
+    tables = {"Dashboard": dash, "To-dos": todo_rows, "Done": done_rows, "Notes & ideas": note_rows}
+    styles = {
+        "Dashboard": {"roles": roles, "widths": [340, 150, 150, 170, 60], "wrap": [1],
+                      "gridlines": False, "tab_color": "#4f46e5"},
+        "To-dos": {"roles": ["header"] + [_todo_role(r) for r in todos],
+                   "widths": [50, 320, 150, 90, 140, 160, 100, 110, 420], "wrap": [2],
+                   "freeze": 1, "filter": True, "tab_color": "#dc2626"},
+        "Done": {"roles": ["header"] + ["done"] * len(done),
+                 "widths": [50, 320, 150, 110, 140, 100, 110], "wrap": [2],
+                 "freeze": 1, "filter": True, "tab_color": "#16a34a"},
+        "Notes & ideas": {"roles": note_roles, "widths": [50, 320, 100, 150, 110, 420],
+                          "wrap": [2], "freeze": 1, "tab_color": "#d97706"},
+    }
+    return tables, styles
+
+
+def sheet_tables(uid, now=None) -> dict:
+    """The user's dashboard as rows for each tab: {tab: [row, row, ...]}."""
+    return _sheet(uid, now or db.now_utc())[0]
+
+
+def sheet_styles(uid, now=None) -> dict:
+    """How each tab should look: {tab: {"roles": [...one per row], "widths": [...], ...}}."""
+    return _sheet(uid, now or db.now_utc())[1]
+
+
+def _fingerprint(tables) -> str:
+    """A hash of the sheet contents, ignoring the 'Last updated' time, so an unchanged
+    dashboard isn't rewritten every few minutes."""
+    import hashlib
+
+    stable = {t: rows for t, rows in tables.items() if t != "Dashboard"}
+    stable["Dashboard"] = [r for r in tables.get("Dashboard", []) if r[:1] != ["Last updated"]]
+    return hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def sync_sheet(uid, push, force=False, now=None) -> str:
+    """Write this user's dashboard with `push(tables, styles)` (sheets.push) if anything changed.
+
+    Returns "synced" or "unchanged". On failure, records the error for /sheet and
+    re-raises; the next run tries again."""
+    now = now or db.now_utc()
+    tables, styles = _sheet(uid, now)
+    fp = _fingerprint(tables)
+    if not force and db.get_setting(uid, "sheet_hash") == fp:
+        return "unchanged"
+    try:
+        link = push(tables, styles)
+    except Exception as e:
+        db.set_setting(uid, "sheet_error", str(e)[:300])
+        raise
+    if isinstance(link, str) and link:
+        db.set_setting(uid, "sheet_url", link)
+    db.set_setting(uid, "sheet_hash", fp)
+    db.set_setting(uid, "sheet_synced_at", db.to_str(now))
+    db.set_setting(uid, "sheet_error", "")
+    return "synced"
+
+
+def cmd_sheet(uid, problem, link, robot_email="") -> Reply:
+    """/sheet: where the dashboard is and whether syncing works."""
+    if problem == "not set up":
+        return Reply(
+            "📊 No Google Sheet dashboard yet. The easiest setup (about 5 minutes) is in the "
+            "README under “Google Sheet dashboard”: paste Pluto's Apps Script into your sheet, "
+            "deploy it, and add GOOGLE_APPS_SCRIPT_URL and GOOGLE_APPS_SCRIPT_SECRET to .env.")
+    if problem:
+        return Reply(f"📊 The Google Sheet dashboard can't sync: {problem}.")
+    synced = db.get_setting(uid, "sheet_synced_at")
+    when = f"{to_local(db.from_str(synced)):%a %d %b, %H:%M}" if synced else "not yet"
+    link = link or db.get_setting(uid, "sheet_url", "") or "(the link appears after the first update)"
+    lines = [f"📊 Your dashboard: {link}", f"Last updated: {when} (checked every 5 minutes)."]
+    err = db.get_setting(uid, "sheet_error")
+    if err:
+        lines.append(f"⚠️ Last attempt failed: {err}")
+        if robot_email and ("403" in err or "permission" in err.lower()):
+            lines.append(f"Share the sheet with {robot_email} as Editor, then send /sheet now.")
+    lines.append("/sheet now to update it right away.")
+    return Reply("\n".join(lines))
+
+
+
+# ---------- nightly profile facts ----------
+
+FACTS_TIME = (3, 30)                     # local time after which the daily run happens
+FACTS_MAX = 60                           # active facts kept
+FACT_MAX_CHARS = 200
+FACTS_EPHEMERAL_DAYS = 30                # "ephemeral" facts retire on their own after this
+FACTS_RETRY = timedelta(minutes=30)
+FACTS_NOTES_MAX = 50                     # new notes considered per run
+
+
+def profile_text(uid) -> str:
+    return "\n".join(f"- {f['text']}" for f in db.active_facts(uid))
+
+
+def _clean_fact(text):
+    if not isinstance(text, str):
+        return ""
+    return " ".join(text.split()).lstrip("-• ").strip()[:FACT_MAX_CHARS]
+
+
+def _expire_ephemeral(uid, now) -> int:
+    cutoff = db.to_str(now - timedelta(days=FACTS_EPHEMERAL_DAYS))
+    n = 0
+    for f in db.active_facts(uid):
+        if f["mark"] == "ephemeral" and f["updated_at"] < cutoff:
+            n += db.retire_fact(uid, f["id"], now)
+    return n
+
+
+def _apply_fact_changes(uid, result, source, now) -> dict:
+    """Validate the model's proposal against this user's active facts and apply it."""
+    if not isinstance(result, dict):
+        raise ValueError("facts answer must be an object")
+    adds, updates, retires = (result.get(k) or [] for k in ("add", "update", "retire"))
+    if not all(isinstance(x, list) for x in (adds, updates, retires)):
+        raise ValueError("add, update and retire must be lists")
+    active = {f["id"]: f for f in db.active_facts(uid)}
+    known = {f["text"].casefold() for f in active.values()}
+    done = {"added": 0, "updated": 0, "retired": 0}
+
+    for fid in retires:
+        fid = parse_id(fid)
+        if fid in active and db.retire_fact(uid, fid, now):
+            known.discard(active.pop(fid)["text"].casefold())
+            done["retired"] += 1
+    for u in updates:
+        if not isinstance(u, dict):
+            continue
+        fid, text = parse_id(u.get("id")), _clean_fact(u.get("text"))
+        if fid not in active or not text or text.casefold() in known:
+            continue
+        mark = u.get("mark") if u.get("mark") in db.FACT_MARKS else active[fid]["mark"]
+        new_id = db.add_fact(uid, text, mark, f"update:{fid}", now)
+        db.retire_fact(uid, fid, now, superseded_by=new_id)
+        known.discard(active.pop(fid)["text"].casefold())
+        known.add(text.casefold())
+        done["updated"] += 1
+    room = FACTS_MAX - len(db.active_facts(uid))
+    for a in adds:
+        if room <= 0:
+            log.info("profile is full (%d facts); skipping new ones", FACTS_MAX)
+            break
+        text = _clean_fact(a.get("text") if isinstance(a, dict) else None)
+        if not text or text.casefold() in known:
+            continue
+        db.add_fact(uid, text, a.get("mark"), source, now)
+        known.add(text.casefold())
+        room -= 1
+        done["added"] += 1
+    return done
+
+
+def update_facts(uid, llm, now=None, force=False):
+    """The nightly profile run. Once per local day, after FACTS_TIME (or straight away with
+    force=True), fold the latest summary and newly saved notes into the profile facts. Makes
+    no AI call when nothing is new. On failure nothing changes and it retries after
+    FACTS_RETRY. Returns the counts applied, or None if it didn't run."""
+    now = now or db.now_utc()
+    if not hasattr(llm, "consolidate"):
+        return None
+    _expire_ephemeral(uid, now)
+    local = to_local(now)
+    today = local.date().isoformat()
+    if not force:
+        if (local.hour, local.minute) < FACTS_TIME or db.get_setting(uid, "facts_last_date") == today:
+            return None
+        retry_after = db.get_setting(uid, "facts_retry_after")
+        if retry_after and db.to_str(now) < retry_after:
+            return None
+
+    summary = db.latest_summary(uid)
+    new_summary = summary is not None and summary["id"] > int(db.get_setting(uid, "facts_summary_id", "0"))
+    notes = db.notes_since(uid, int(db.get_setting(uid, "facts_item_id", "0")), FACTS_NOTES_MAX)
+    if not new_summary and not notes:
+        db.set_setting(uid, "facts_last_date", today)
+        return None
+
+    facts = [{"id": f["id"], "mark": f["mark"], "text": f["text"]} for f in db.active_facts(uid)]
+    note_views = [{"kind": n["kind"], "title": n["title"], "original_text": n["original_text"]} for n in notes]
+    try:
+        result = llm.consolidate(facts, summary["text"] if new_summary else "", note_views, local,
+                                 prefer=db.get_setting(uid, "model"))
+        source = f"summary:{summary['id']}" if new_summary else "notes"
+        done = _apply_fact_changes(uid, result, source, now)
+    except Exception:
+        log.exception("profile facts update failed; nothing changed")
+        db.set_setting(uid, "facts_retry_after", db.to_str(now + FACTS_RETRY))
+        return None
+    if summary is not None:
+        db.set_setting(uid, "facts_summary_id", str(summary["id"]))
+    if notes:
+        db.set_setting(uid, "facts_item_id", str(notes[-1]["id"]))
+    db.set_setting(uid, "facts_last_date", today)
+    db.set_setting(uid, "facts_retry_after", "")
+    return done
+
+
+def cmd_facts(uid, arg=None) -> Reply:
+    """/facts             what Pluto knows about you
+    /facts delete 3    forget one fact
+    /facts clear       forget them all"""
+    arg = (arg or "").strip().lower()
+    if arg == "clear":
+        n = db.delete_facts(uid)
+        return Reply(f"Forgot all {n} profile facts. Your saved items and chat are untouched.")
+    if arg.startswith(("delete", "del", "forget")):
+        fid = parse_id(arg.split(maxsplit=1)[1] if " " in arg else "")
+        if fid is None:
+            return Reply("Usage: /facts delete <number>")
+        return Reply(f"Forgot fact {fid}." if db.delete_fact(uid, fid) else f"I can't find fact {fid}.")
+    if arg:
+        return Reply("Usage: /facts, /facts delete <number>, or /facts clear")
+    facts = db.active_facts(uid)
+    if not facts:
+        return Reply("I don't have any profile facts about you yet. Each night I go over our "
+                     "older chats and your notes and keep a few lasting ones (people, "
+                     "preferences, routines) here.")
+    lines = [f"{f['id']}. {f['text']}" for f in facts]
+    return Reply(_short("🪪 What I know about you:\n" + "\n".join(lines) +
+                        "\n\n/facts delete <number> to remove one · /facts clear to remove all"))

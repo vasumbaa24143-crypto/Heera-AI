@@ -4,6 +4,7 @@ This file only translates between Telegram and core.py, which holds the flow.
 """
 import asyncio
 import io
+import json
 import logging
 import os
 import sys
@@ -13,7 +14,8 @@ import envfile
 envfile.load()
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
-from telegram.error import BadRequest  # noqa: E402
+from telegram.error import BadRequest, NetworkError  # noqa: E402
+from telegram.request import HTTPXRequest  # noqa: E402
 from telegram.ext import (  # noqa: E402
     Application,
     CallbackQueryHandler,
@@ -26,7 +28,9 @@ from telegram.ext import (  # noqa: E402
 import core  # noqa: E402
 import db  # noqa: E402
 import llm  # noqa: E402
+import sheets  # noqa: E402
 import stt  # noqa: E402
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO lines include the bot token
@@ -65,55 +69,139 @@ async def send(message, replies) -> None:
 
 # ---------- handlers ----------
 
+VOICE_ATTEMPTS = 3          # Telegram's file server is sometimes slow; try this many times
+VOICE_RETRY_WAIT = (2, 5)   # seconds before the 2nd and 3rd attempt
+VOICE_TIMEOUT = 60          # seconds to fetch the file (the library's default is 5)
+VOICE_RETRY = "voice:retry"
+
+
+def _msg(update):
+    """The message to read and answer. Telegram sends an edited message as
+    `edited_message` (with `message` empty), so use whichever one this update carries."""
+    return getattr(update, "effective_message", None) or update.message
+
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await update.message.reply_text(core.START_TEXT)
+    await _msg(update).reply_text(core.START_TEXT)
+
+
+async def typing(message) -> None:
+    """Show "typing…" while Pluto thinks (an answer can take a while when a provider is slow)."""
+    try:
+        await message.chat.send_action("typing")
+    except Exception:
+        pass  # only a courtesy
+
+
+def quoted_text(message):
+    """The text of the message the user replied to (Telegram's "Reply"), if any."""
+    quoted = getattr(message, "reply_to_message", None)
+    if quoted is None:
+        return None
+    return quoted.text or getattr(quoted, "caption", None) or None
 
 
 async def handle_text(update: Update, text: str) -> None:
     uid = update.effective_user.id
-    replies = await asyncio.to_thread(core.chat, uid, text, llm)
-    await send(update.message, replies)
+    await typing(_msg(update))
+    replies = await asyncio.to_thread(
+        core.chat, uid, text, llm, replying_to=quoted_text(_msg(update))
+    )
+    await send(_msg(update), replies)
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await handle_text(update, update.message.text)
+    await handle_text(update, _msg(update).text)
+
+
+async def fetch_audio(get_file) -> bytes:
+    """Download a voice note with `get_file` (e.g. voice.get_file), retrying timeouts and
+    dropped connections. A request Telegram refuses (BadRequest) is not retried."""
+    for attempt in range(VOICE_ATTEMPTS):
+        try:
+            f = await get_file(read_timeout=VOICE_TIMEOUT, connect_timeout=20)
+            buf = io.BytesIO()
+            await f.download_to_memory(buf, read_timeout=VOICE_TIMEOUT, connect_timeout=20)
+            return buf.getvalue()
+        except BadRequest:
+            raise
+        except NetworkError as e:  # includes TimedOut
+            if attempt == VOICE_ATTEMPTS - 1:
+                raise
+            log.warning("voice download attempt %d failed (%s); retrying", attempt + 1,
+                        type(e).__name__)
+            await asyncio.sleep(VOICE_RETRY_WAIT[min(attempt, len(VOICE_RETRY_WAIT) - 1)])
+
+
+def remember_voice(uid, file_id, filename, mime) -> None:
+    db.set_setting(uid, "pending_voice", json.dumps({"file_id": file_id, "filename": filename,
+                                                     "mime": mime}))
+
+
+async def hear(update: Update, get_file, filename, mime, file_id=None) -> None:
+    """Download, transcribe and answer a voice note. If it can't be fetched or understood,
+    keep its file id so the "Try again" button can retry the same note."""
+    uid = update.effective_user.id
+    message = _msg(update)
+    retry = [[("🔁 Try again", VOICE_RETRY)]] if file_id else []
+    await typing(message)
+    try:
+        audio = await fetch_audio(get_file)
+        text = await stt.transcribe(audio, filename=filename, mime=mime)
+    except stt.TranscriptionFailed as e:
+        log.warning("transcription failed: %s", e)
+        if not stt.providers():
+            await message.reply_text(
+                f"I can't listen to voice notes yet: add one of {stt.KEY_NAMES} to pluto.env "
+                "and restart me. Meanwhile, please type it.")
+            return
+        if file_id:
+            remember_voice(uid, file_id, filename, mime)
+        await send(message, [core.Reply("I couldn't make out that voice note just now. "
+                                        "Tap Try again, or type it.", retry)])
+        return
+    except Exception:
+        log.exception("could not download the voice note")
+        if file_id:
+            remember_voice(uid, file_id, filename, mime)
+        await send(message, [core.Reply("Telegram was too slow handing me that voice note. "
+                                        "Tap Try again, or send it once more.", retry)])
+        return
+    db.set_setting(uid, "pending_voice", "")
+    if not text:
+        await message.reply_text("I heard silence. Try again?")
+        return
+    await message.reply_text(f"🎙 Heard: {text}")
+    await handle_text(update, text)
 
 
 async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    v = update.message.voice or update.message.audio
+    v = _msg(update).voice or _msg(update).audio
+    await hear(update, v.get_file, getattr(v, "file_name", None) or "voice.ogg",
+               getattr(v, "mime_type", None) or "audio/ogg", getattr(v, "file_id", None))
+
+
+async def retry_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The "Try again" button under a voice note that failed."""
+    uid = update.effective_user.id
     try:
-        f = await v.get_file()
-        buf = io.BytesIO()
-        await f.download_to_memory(buf)
-        text = await stt.transcribe(
-            buf.getvalue(),
-            filename=getattr(v, "file_name", None) or "voice.ogg",
-            mime=getattr(v, "mime_type", None) or "audio/ogg",
-        )
-    except stt.TranscriptionFailed as e:
-        log.warning("transcription failed: %s", e)
-        if not stt.providers():
-            msg = (f"I can't listen to voice notes yet: add one of {stt.KEY_NAMES} to pluto.env "
-                   "and restart me. Meanwhile, please type it.")
-        else:
-            msg = "I couldn't make out that voice note just now. Please try again or type it."
-        await update.message.reply_text(msg)
+        pending = json.loads(db.get_setting(uid, "pending_voice") or "{}")
+    except ValueError:
+        pending = {}
+    if not pending.get("file_id"):
+        await _msg(update).reply_text("I don't have a voice note waiting. Please send it again.")
         return
-    except Exception:
-        log.exception("could not download the voice note")
-        await update.message.reply_text("I couldn't download that voice note. Please try again.")
-        return
-    if not text:
-        await update.message.reply_text("I heard silence. Try again?")
-        return
-    await update.message.reply_text(f"🎙 Heard: {text}")
-    await handle_text(update, text)
+
+    async def get_file(**timeouts):
+        return await ctx.bot.get_file(pending["file_id"], **timeouts)
+
+    await hear(update, get_file, pending.get("filename") or "voice.ogg",
+               pending.get("mime") or "audio/ogg", pending["file_id"])
 
 
 def _arg(ctx):
@@ -123,50 +211,69 @@ def _arg(ctx):
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_list(update.effective_user.id)])
+    await send(_msg(update), [core.cmd_list(update.effective_user.id)])
 
 
 async def cmd_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_done(update.effective_user.id, _arg(ctx))])
+    await send(_msg(update), [core.cmd_done(update.effective_user.id, _arg(ctx))])
 
 
 async def cmd_snooze(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_snooze(update.effective_user.id, _arg(ctx))])
+    await send(_msg(update), [core.cmd_snooze(update.effective_user.id, _arg(ctx))])
 
 
 async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_delete(update.effective_user.id, _arg(ctx))])
+    await send(_msg(update), [core.cmd_delete(update.effective_user.id, _arg(ctx))])
 
 
 async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_forget(update.effective_user.id)])
+    await send(_msg(update), [core.cmd_forget(update.effective_user.id)])
 
 
 async def cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
-    await send(update.message, [core.cmd_model(update.effective_user.id, llm, _arg(ctx))])
+    await send(_msg(update), [core.cmd_model(update.effective_user.id, llm, _arg(ctx))])
+
+
+async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(_msg(update), [core.cmd_digest(update.effective_user.id, _arg(ctx))])
+
+
+async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(_msg(update), [core.cmd_summary(update.effective_user.id)])
 
 
 async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
     data = core.export_json(update.effective_user.id)
-    await update.message.reply_document(io.BytesIO(data.encode()), filename="pluto-export.json")
+    await _msg(update).reply_document(io.BytesIO(data.encode()), filename="pluto-export.json")
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()  # always stop the button's loading spinner
     if not allowed(update):
+        return
+    if q.data == VOICE_RETRY:
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+        await retry_voice(update, ctx)
         return
     reply = core.button(update.effective_user.id, q.data, llm=llm)
     if reply is None:
@@ -192,7 +299,92 @@ async def nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             log.exception("nudge failed for item %s", item_id)
             continue
-        db.mark_nudged(item_id, uid, now)
+        core.record_nudge(uid, item_id, reply, now)
+
+
+def digest_users() -> list:
+    """Who gets a morning digest: the one allowed user."""
+    return [int(ALLOWED)] if ALLOWED.isdigit() else []
+
+
+async def digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    now = db.now_utc()
+    for uid, reply, to_mark in core.due_digests(digest_users(), now):
+        if reply is not None:
+            try:
+                await ctx.bot.send_message(uid, reply.text, reply_markup=markup(reply))
+            except Exception:
+                log.exception("digest failed for user %s", uid)
+                continue  # not marked as sent: tried again next minute, until the grace ends
+        core.digest_done(uid, to_mark, now)
+
+
+SHEET_EVERY_SECONDS = 300
+
+
+async def sheet_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Keep the Google Sheet dashboard current (only writes when something changed)."""
+    if sheets.problem():
+        return
+    for uid in digest_users():
+        try:
+            await asyncio.to_thread(core.sync_sheet, uid, sheets.push)
+        except Exception as e:
+            log.warning("sheet sync failed for user %s: %s", uid, e)
+
+
+async def cmd_sheet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    if _arg(ctx) == "now" and not sheets.problem():
+        try:
+            await asyncio.to_thread(core.sync_sheet, uid, sheets.push, True)
+        except Exception as e:
+            log.warning("sheet sync failed for user %s: %s", uid, e)
+    reply = core.cmd_sheet(uid, sheets.problem(), sheets.url(), sheets.service_account_email())
+    await _msg(update).reply_text(reply.text, disable_web_page_preview=True)
+
+
+async def facts_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """The nightly profile-facts run (once a day after 03:30; usually a quick no-op)."""
+    for uid in digest_users():
+        try:
+            await asyncio.to_thread(core.update_facts, uid, llm)
+        except Exception:
+            log.exception("facts job failed for user %s", uid)
+
+
+async def cmd_facts(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(_msg(update), [core.cmd_facts(update.effective_user.id, " ".join(ctx.args or []))])
+
+
+async def topics_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Give a topic to items saved without one (older items, plain-note fallbacks), in a
+    worker thread since it calls the AI. A quick no-op when everything is labelled."""
+    for uid in digest_users():
+        try:
+            await asyncio.to_thread(core.update_topics, uid, llm)
+        except Exception:
+            log.exception("topics job failed for user %s", uid)
+
+
+async def cmd_topic(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not allowed(update):
+        return
+    await send(_msg(update), [core.cmd_topic(update.effective_user.id, " ".join(ctx.args or []))])
+
+
+async def summary_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fold chat that has left the recent window into the rolling summary (in a worker
+    thread, since it may call the AI). Usually a quick no-op."""
+    for uid in digest_users():
+        try:
+            await asyncio.to_thread(core.update_summary, uid, llm)
+        except Exception:
+            log.exception("summary job failed for user %s", uid)
 
 
 def check_config() -> None:
@@ -209,10 +401,29 @@ def check_config() -> None:
         log.warning("Only one AI provider is set; add another key so Pluto has a fallback.")
     if not stt.providers():
         log.warning("No speech-to-text key (%s): voice notes won't work, text will.", stt.KEY_NAMES)
+    if sheets.problem() not in ("", "not set up"):
+        log.warning("Google Sheet dashboard: %s", sheets.problem())
 
 
-def build_app() -> Application:
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+class PollingRequest(HTTPXRequest):
+    """The connection that asks Telegram for new messages. Every answer, even an empty
+    one or an error status, tells the watchdog that polling is alive."""
+
+    def __init__(self, dog: watchdog.Watchdog):
+        super().__init__(connection_pool_size=1)  # what python-telegram-bot uses for polling
+        self.dog = dog
+
+    async def do_request(self, *args, **kwargs):
+        answer = await super().do_request(*args, **kwargs)
+        self.dog.beat()
+        return answer
+
+
+def build_app(dog: watchdog.Watchdog | None = None) -> Application:
+    builder = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"])
+    if dog is not None:
+        builder = builder.get_updates_request(PollingRequest(dog))
+    app = builder.build()
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("done", cmd_done))
@@ -220,12 +431,22 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("forget", cmd_forget))
     app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("digest", cmd_digest))
+    app.add_handler(CommandHandler("summary", cmd_summary))
+    app.add_handler(CommandHandler("facts", cmd_facts))
+    app.add_handler(CommandHandler("topic", cmd_topic))
+    app.add_handler(CommandHandler("sheet", cmd_sheet))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(nudge_job, interval=NUDGE_EVERY_SECONDS, first=5)
+    app.job_queue.run_repeating(digest_job, interval=NUDGE_EVERY_SECONDS, first=10)
+    app.job_queue.run_repeating(summary_job, interval=NUDGE_EVERY_SECONDS, first=30)
+    app.job_queue.run_repeating(facts_job, interval=NUDGE_EVERY_SECONDS, first=40)
+    app.job_queue.run_repeating(topics_job, interval=NUDGE_EVERY_SECONDS, first=15)
+    app.job_queue.run_repeating(sheet_job, interval=SHEET_EVERY_SECONDS, first=20)
     return app
 
 
@@ -237,6 +458,10 @@ KEY_REPORT = [
     ("ZAI_API_KEY", "Z AI", "AI"),
     ("NVIDIA_API_KEY", "NVIDIA Nemotron", "AI"),
     ("SARVAM_API_KEY", "Sarvam (voice backup)", "optional"),
+    ("GOOGLE_APPS_SCRIPT_URL", "Google Sheet via Apps Script (web app link)", "optional"),
+    ("GOOGLE_APPS_SCRIPT_SECRET", "Apps Script secret word", "optional"),
+    ("GOOGLE_SHEETS_ID", "Google Sheet via service account (sheet id or URL)", "optional"),
+    ("GOOGLE_SERVICE_ACCOUNT_FILE", "Google service account key file (path)", "optional"),
 ]
 
 
@@ -250,18 +475,33 @@ def key_report() -> str:
     lines.append(f"AI order: {llm.describe()}")
     voice = " → ".join(stt.providers()) or f"✗ none (add {stt.KEY_NAMES})"
     lines.append(f"Voice notes: {voice}")
+    how = {"apps_script": "Apps Script", "service_account": "service account"}.get(sheets.mode(), "")
+    lines.append(f"Google Sheet: {f'✓ via {how}' if not sheets.problem() else sheets.problem()}")
     if not llm.providers():
         lines.append("✗ Set at least one AI key.")
     return "\n".join(lines)
+
+
+def dashboard_json() -> str:
+    """The dashboard tabs as JSON ({tab: rows}), for updating a sheet by hand or via Claude."""
+    if not ALLOWED.isdigit():
+        raise SystemExit("ALLOWED_USER_ID must be set in .env to know whose items to export.")
+    db.init()
+    return json.dumps(core.sheet_tables(int(ALLOWED)), ensure_ascii=False)
 
 
 def main() -> None:
     if "--check" in sys.argv[1:]:
         print(key_report())
         return
+    if "--dashboard-json" in sys.argv[1:]:
+        print(dashboard_json())
+        return
     check_config()
     db.init()
-    app = build_app()
+    dog = watchdog.Watchdog()
+    app = build_app(dog)
+    dog.start()
     log.info("Pluto is running (AI: %s)", llm.describe())
     app.run_polling()
 

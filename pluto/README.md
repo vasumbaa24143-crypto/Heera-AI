@@ -9,7 +9,7 @@ You chat with it like a smart assistant, by text or voice note, in English, Hind
 - **Priority comes from your words.** "urgent", "zaroori", "jaldi" → 🔴 high; "no rush" → low.
 - **Ask about your plans.** "What's on my plate today?", "is hafte kya hai?", "this month", "overall what do I need to do?", "what have we discussed about the YouTube idea?" It answers only from what you saved and said.
 - **Tell it when things are done.** "Rahul ko deck bhej diya" → marks that item done.
-- **Nudges** when something is due, or when an idea goes untouched.
+- **Reminders on time**, follow-up nudges if something stays open, and a **morning digest**.
 
 ## Setup (about 10 minutes)
 
@@ -33,6 +33,35 @@ python bot.py
    - "remind me kal shaam Rahul ko deck bhejna hai"
    - then ask: "aaj aur kal kya kya hai?" or "YouTube wala idea kya tha?"
 
+## Run it on a Mac in the background
+
+So you don't need a terminal window open:
+
+```bash
+cd ~/Heera-AI/pluto
+./mac/pluto.sh install --awake
+```
+
+This creates the Python environment if needed, installs the requirements, checks your `.env` (and creates it
+from the template the first time, then stops so you can fill it in), and registers Pluto as a background app
+that **starts when you log in and restarts itself if it stops**.
+
+| Command | What it does |
+|---|---|
+| `./mac/pluto.sh status` | Is it running? Shows the last log line. |
+| `./mac/pluto.sh logs` | Follow the log (Ctrl-C to stop watching). |
+| `./mac/pluto.sh restart` | Use after changing `.env` or pulling new code. |
+| `./mac/pluto.sh stop` / `start` | Pause and resume. |
+| `./mac/pluto.sh uninstall` | Remove the background app. Your data, `.env` and logs stay. |
+
+- `--awake` stops the Mac from idle-sleeping while Pluto runs (it uses macOS's own `caffeinate`). Leave it off
+  to let the Mac sleep normally; reminders then wait until it wakes.
+- **Closing the lid still puts a MacBook to sleep**, so reminders pause until you open it. Reminders due while it
+  slept arrive when it wakes, and the morning digest catches up within 4 hours. For truly always-on, deploy it (below).
+- Keep the `Heera-AI` folder in your home folder. macOS restricts background apps inside Documents, Desktop and Downloads.
+- Logs are in `~/Library/Logs/Pluto/pluto.log`. The background job is `~/Library/LaunchAgents/com.heeralal.pluto.plist`.
+- Don't also run `python bot.py` by hand while it's installed: two copies would fight over Telegram.
+
 ## Try it without Telegram
 
 ```bash
@@ -54,13 +83,124 @@ The tests use a fake assistant and fake Telegram objects, so they need no keys o
 
 ## Commands
 
-`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/forget` (clear chat history) · `/model` (choose which AI thinks first) · `/export` (JSON download of items and chat)
+`/list` open items · `/done 3` · `/snooze 3` (+1 day) · `/delete 3` (forever) · `/summary` (what Pluto remembers from older chats) · `/facts` (what Pluto knows about you; `/facts delete 3`, `/facts clear`) · `/sheet` (Google Sheet dashboard; `/sheet now` updates it) · `/topic` (your topics; `/topic jobs`, `/topic 12 Money`) · `/forget` (clear chat history, its summary and profile facts) · `/model` (choose which AI thinks first) · `/digest` (morning digest: `now` to preview, `on`/`off`, or a time like `07:45`) · `/export` (JSON download of items and chat)
+
+## Morning digest
+
+One message each morning (08:30 by default, in `PLUTO_TZ`):
+
+```
+☀️ Good morning! Here's your day (Tue 03 Nov):
+
+⚠️ Overdue (2)
+• #14 🔴 Renew passport (was due Sun 01 Nov, 10:00)
+• #9 Send deck to Rahul (was due Mon 02 Nov, 18:00)
+
+📅 Today (1)
+• #21 Call bank — 15:00
+
+💡 From a while back
+• #4 YouTube tech news segment (you told me 12 days ago). Still interested?
+```
+
+- Built straight from your saved items, with no AI call, so it costs nothing and can't invent anything.
+- **Skipped when there's nothing to say.** Never more than one a day, and nothing until you've saved something.
+- Up to 5 items per section ("…and N more — /list"). It has ✅ buttons for the items and a 🗄 Drop button for the idea.
+- One old idea a day: at least a week old and not shown in the last week, taking turns.
+- If the bot was off at digest time, it catches up within 4 hours; later than that, it skips the day.
+- Items due later today still get their own reminder at their time. Overdue items shown in the digest don't get a repeat nudge right after it.
+- With the digest on, old ideas come up only in the digest. With `/digest off`, they get their own nudges as before.
+
+## Google Sheet dashboard (optional)
+
+Pluto can keep a Google Sheet up to date with four tabs:
+- **Dashboard:** a one-line "start with…" headline; tiles for overdue, due today, this week, urgent, open
+  to-dos, ideas, notes and done in the last 7 days; **Focus now** (overdue, due today, urgent); **Coming up**
+  (next 7 days); **By topic**; **Recently saved**; **Recently finished**.
+- **To-dos:** every open to-do and reminder, most urgent first, with topic, priority, due date, status
+  ("⚠️ Overdue · 3 days", "📅 Today") and your own words. Overdue rows are red, today blue, urgent orange.
+- **Done:** finished and dropped items, with when.
+- **Notes & ideas:** everything else you saved, grouped by topic like a notebook.
+
+**Topics.** Every item gets a short topic (Jobs, Money, Content ideas, a project's name…) so the dashboard can
+group things. The assistant picks it when it saves the item, reusing your existing topics; a background job labels
+anything saved without one (older items, plain-note fallbacks) a batch at a time. Topics are derived labels: your own
+words are never changed. `/topic` lists them, `/topic jobs` shows one, `/topic 12 Money` moves an item.
+
+Colours, column widths, frozen headers and filters come from the Apps Script (option A). If you set up the sheet with
+an older copy of `Code.gs`, paste the new one over it (keep your secret word), save, then **Deploy → Manage
+deployments → edit (pencil) → Version: New version → Deploy**. The `/exec` link stays the same. Until then the sheet
+gets the new rows without the colours. The service account (option B) writes the values only.
+
+With option A or B, Pluto checks every 5 minutes and writes only when something changed. It's **one-way**: edits
+you make in the sheet are overwritten, so mark things done in Telegram. Text is always stored as plain text, so
+nothing you typed can turn into a spreadsheet formula. Your items will also be stored in Google once you turn this on.
+
+There are three ways to connect it. Pick one.
+
+### Option A: Apps Script link (easiest, about 5 minutes, no Google Cloud)
+
+1. Create a Google Sheet ([sheets.new](https://sheets.new)) and name it e.g. "Pluto dashboard".
+2. **Extensions → Apps Script**. Delete what's there and paste the whole of
+   [`apps_script/Code.gs`](apps_script/Code.gs).
+3. On the `const SECRET = ...` line, replace `CHANGE-ME-to-a-long-random-word` with a long random word
+   (at least 16 characters, e.g. from `python3 -c "import secrets; print(secrets.token_urlsafe(24))"`). Save.
+4. **Deploy → New deployment →** gear icon **→ Web app**. Set *Execute as*: **Me** and
+   *Who has access*: **Anyone**, then **Deploy**. Google asks you to allow access: choose your account,
+   then **Advanced → Go to (project) (unsafe) → Allow**. That warning appears because this is your own unreviewed script.
+5. Copy the **Web app URL** (it ends in `/exec`) and put both values in `.env`:
+   ```
+   GOOGLE_APPS_SCRIPT_URL=https://script.google.com/macros/s/.../exec
+   GOOGLE_APPS_SCRIPT_SECRET=<the same word as in the script>
+   ```
+6. `python bot.py --check` should show `Google Sheet: ✓ via Apps Script`. Restart the bot and send `/sheet now`.
+
+"Anyone" only means the link works without a Google login. Every request must carry your secret word or the script
+refuses it, and the script only touches Pluto's four tabs. Keep the URL and the word private, like your other keys.
+If you edit the script later, use **Deploy → Manage deployments → Edit → New version** so the same URL keeps working.
+
+### Option B: service account (for people who already use Google Cloud)
+
+1. At [console.cloud.google.com](https://console.cloud.google.com), pick a project. The one AI Studio made for your Gemini key works.
+2. **APIs & Services → Library** → **Google Sheets API** → **Enable**.
+3. **APIs & Services → Credentials → Create credentials → Service account**. Name it `pluto` → **Done**. No roles are needed.
+4. Open it → **Keys → Add key → Create new key → JSON**. Keep the downloaded file **outside** the Pluto folder; it's a password:
+   ```bash
+   mkdir -p ~/.config/pluto && mv ~/Downloads/<the-file>.json ~/.config/pluto/service-account.json && chmod 600 ~/.config/pluto/service-account.json
+   ```
+5. Share your Google Sheet with the service account's email (it ends in `.iam.gserviceaccount.com`) as **Editor**.
+6. In `.env`:
+   ```
+   GOOGLE_SHEETS_ID=https://docs.google.com/spreadsheets/d/...your sheet's URL...
+   GOOGLE_SERVICE_ACCOUNT_FILE=~/.config/pluto/service-account.json
+   ```
+7. `python bot.py --check` should show `Google Sheet: ✓ via service account`. Restart the bot and send `/sheet now`.
+
+If `/sheet` says permission was denied, the sheet isn't shared with that email yet. A work Google account may block
+creating keys; use Option A then. If both options are set, the service account is used.
+
+### Option C: ask Claude to update it (no setup, not automatic)
+
+If your Claude account has the Google Sheets connector, Claude can copy the dashboard into a sheet whenever you ask.
+The sheet only changes when you ask, and your items pass through Claude as well as Google. In `~/Heera-AI/pluto`,
+open Claude Code (`claude`) and paste:
+
+```
+Run `.venv/bin/python bot.py --dashboard-json` in this folder. It prints JSON shaped like
+{"<tab name>": [[header...], [row...], ...]} for four tabs: Dashboard, To-dos, Done, Notes & ideas.
+Using the Google Sheets connector, open my spreadsheet named "Pluto dashboard" (create it if it
+doesn't exist). For each tab in the JSON: create the tab if it's missing, clear it, and write the
+rows exactly as given starting at A1. Write every value as plain text or a number, never as a
+formula (if a cell starts with = + - or @, keep it as text), and make the first row bold.
+Don't change other tabs, don't modify pluto.db or any other file, and don't send this data
+anywhere else. When done, tell me the sheet's link and how many rows each tab has.
+```
 
 ## How reminders and nudges work
 
 - Checked every minute while the bot is running.
 - **A reminder you set always arrives at the time you asked for**, even at night, and doesn't count against any limit.
-- If it's still open afterwards, Pluto nudges again every 6 hours (up to 5 times). Ideas you haven't touched get a nudge after 3 days, then every 3 days (up to 3 times).
+- If it's still open afterwards, Pluto nudges again every 6 hours (up to 5 times). With the digest off, ideas you haven't touched get a nudge after 3 days, then every 3 days (up to 3 times).
 - Those follow-up nudges wait until morning (no follow-ups 22:00–08:00, `QUIET_START/END` in `core.py`) and are capped at 5 per 24 hours.
 - Done / Snooze / Drop buttons on every nudge.
 - Your computer must be awake with `python bot.py` running for reminders to arrive. To get them when your Mac is asleep, deploy it (see below).
@@ -77,8 +217,16 @@ keys live only in `pluto.env`.
 and mount a volume for the database (set `PLUTO_DB` to a path on the volume, e.g. `/data/pluto.db`).
 The bot must be running to nudge.
 
+If Telegram stops answering for 5 minutes (the network dropped and polling hung, as
+happened once), the bot logs `No answer from Telegram` and exits on purpose, so whatever
+runs it can start it again: Railway's restart policy, or on a Mac a launchd login item
+with `KeepAlive`. Messages sent meanwhile wait at Telegram (up to 24 hours) and arrive
+after the restart. Run by hand, it simply stops; start it again.
+
 ## Known limits
 
-- Each message sends the last 100 chat messages and your open items (plus 50 recent closed ones) to the model. "What have we discussed" only reaches that far back in the chat; saved items are always included. Add search/embeddings when this gets slow or costly.
+- **Search:** each message sends the AI your open items (the 150 most urgent), the 20 most recently finished, and the last 30 chat messages. On top of that, it sends up to 10 older items and 10 older messages that contain the same words, found with SQLite's built-in full-text search (FTS5). So "what did we discuss about Goa?" reaches back to your very first message, while each message stays small. Search matches **words, not meaning**: "beach holiday" won't find "Goa trip", and Hindi in Devanagari won't match the same word typed in Latin letters. If your Python's SQLite lacks FTS5, Pluto falls back to a slower plain-text search.
+- **Rolling summary:** once 20 or more messages have scrolled out of the last 30, Pluto asks the AI (in the background, checked every minute) to fold them into a short summary of older chats: plans, people, decisions, preferences, at most 15 lines. Every reply gets that summary as background. `/summary` shows it, `/forget` clears it, and `/delete` throws it away so it's rebuilt without the deleted words. If the AI fails, the old summary stays and it tries again 10 minutes later. Your saved items and messages are never changed by this.
+- **Profile facts:** once a day after 03:30 (or as soon as the bot starts, if it was off), Pluto asks the AI to fold the latest summary and newly saved notes into a short list of lasting facts about you: people and how they relate to you, birthdays, preferences (including how you like replies), routines and goals. It's at most 60 facts, and no AI call is made if nothing is new. Every reply gets them as background. Corrections replace old facts, short-term ones ("busy with exams") expire after 30 days, and to-dos and sensitive details like passwords are kept out. `/facts` lists them, `/facts delete 3` or `/facts clear` removes them, `/forget` clears them with the chat, and `/delete` of an item also forgets facts that mention it.
 - Voice notes: Groq `whisper-large-v3` → Gemini → Sarvam `saarika:v2.5` (`STT_PROVIDERS` changes the order).
 - AI providers are tried in order Gemini → Groq → Z AI → NVIDIA Nemotron (`PLUTO_PROVIDERS` changes it, and `/model` in chat picks which one goes first; the rest stay as backup). Default models: `gemini-2.5-flash`, `llama-3.3-70b-versatile` (Groq), `glm-4.6` (Z AI), `nvidia/nemotron-3.5-super-vl-120b-a12b` (NVIDIA, with thinking off for quick replies; `NVIDIA_THINKING=1` turns it on); change `PLUTO_MODEL`, `GROQ_MODEL`, `ZAI_MODEL`, `NVIDIA_MODEL` if a provider retires one. Fallback models may phrase replies differently, but the code-side checks (what gets saved, never citing unknown items) apply to all of them.
