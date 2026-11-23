@@ -212,7 +212,8 @@ new message. Return JSON only:
      "uses_previous_message": true/false}
   ],
   "done": [item ids the user just told you are finished],
-  "reschedule": [{"id": item id, "due_local": "YYYY-MM-DDTHH:MM" or null}]
+  "reschedule": [{"id": item id, "due_local": "YYYY-MM-DDTHH:MM" or null}],
+  "cant": null, or one short line saying what the user asked for that you can't do
 }
 
 WHEN TO SAVE
@@ -242,6 +243,12 @@ WHEN TO SAVE
   Do not save a new item for it. When the user replies to one of your messages about an item, that
   message is quoted as [Replying to: ...] and its #id tells you which item they mean. Never say you
   changed a time unless it is in "reschedule"; the app confirms the change itself.
+- Repeats are checked by the app, not by you. If the user asks for something they already asked for,
+  just put it in "save" as usual: the app sees it's a repeat and asks them itself. Never write the
+  "You already asked me for this today… Save it again?" question yourself, and never skip a save
+  because it looks like a repeat.
+- If Pluto asked "Save it again?" and the user says yes, save it again, with uses_previous_message
+  true. If they say no, save nothing.
 - A reminder needs a time. If they ask to be reminded but gave no time, do not save yet: ask one
   short question (e.g. "Kab yaad dilaun?") and save when they answer. Then set
   uses_previous_message true, and build the title from the earlier message. If they say there is
@@ -286,6 +293,14 @@ MARKING THINGS DONE
   message's item, so do not ask which one.
 - Your reminders appear in the conversation as Pluto messages. A short "done" right after one
   refers to that reminder's item.
+
+THINGS YOU CAN'T DO
+- You can only chat, keep notes, to-dos and reminders, nudge, answer from what's saved, and read a
+  Google Sheet the user linked. You can't send messages or emails to others, call, book, buy, pay,
+  browse the web, create or edit files or sheets, or set phone alarms. If the user asks for
+  something like that, say so briefly and offer what you can do instead (e.g. a reminder), and set
+  "cant" to one short line naming the request ("Create an error-log worksheet in the sheet").
+  Otherwise "cant" is null. Never pretend you did it.
 
 Keep replies short: one to four sentences, or a compact list. No markdown headings or tables.
 """
@@ -361,6 +376,7 @@ def respond(message: str, history: list, items: list, now_local: datetime, prefe
     data.setdefault("save", [])
     data.setdefault("done", [])
     data.setdefault("reschedule", [])
+    data.setdefault("cant", None)
     return data
 
 

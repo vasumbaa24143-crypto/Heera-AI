@@ -132,7 +132,7 @@ One message each morning (08:30 by default, in `PLUTO_TZ`):
 
 ## Google Sheet dashboard (optional)
 
-Pluto can keep a Google Sheet up to date with four tabs:
+Pluto can keep a Google Sheet up to date with five tabs:
 - **Dashboard:** a one-line "start with…" headline; tiles for overdue, due today, this week, urgent, open
   to-dos, ideas, notes and done in the last 7 days; **Focus now** (overdue, due today, urgent); **Coming up**
   (next 7 days); **By topic**; **Recently saved**; **Recently finished**.
@@ -140,6 +140,11 @@ Pluto can keep a Google Sheet up to date with four tabs:
   ("⚠️ Overdue · 3 days", "📅 Today") and your own words. Overdue rows are red, today blue, urgent orange.
 - **Done:** finished and dropped items, with when.
 - **Notes & ideas:** everything else you saved, grouped by topic like a notebook.
+- **Error log:** what went wrong (no AI answered, a voice note couldn't be heard, the sheet couldn't be
+  updated) and requests Pluto can't do ("book a cab", "make a new tab"), newest first, with your words. It's
+  written in plain words, never with keys or links from error messages. `/forget` clears it; `/delete` of an
+  item removes the entries for its message. A copy of `Code.gs` older than this tab simply skips it until you
+  paste in the new one.
 
 **Topics.** Every item gets a short topic (Jobs, Money, Content ideas, a project's name…) so the dashboard can
 group things. The assistant picks it when it saves the item, reusing your existing topics; a background job labels
@@ -175,7 +180,7 @@ There are three ways to connect it. Pick one.
 6. `python bot.py --check` should show `Google Sheet: ✓ via Apps Script`. Restart the bot and send `/sheet now`.
 
 "Anyone" only means the link works without a Google login. Every request must carry your secret word or the script
-refuses it, and the script only touches Pluto's four tabs. Keep the URL and the word private, like your other keys.
+refuses it, and the script only touches Pluto's five tabs. Keep the URL and the word private, like your other keys.
 If you edit the script later, use **Deploy → Manage deployments → Edit → New version** so the same URL keeps working.
 
 ### Option B: service account (for people who already use Google Cloud)
@@ -206,7 +211,7 @@ open Claude Code (`claude`) and paste:
 
 ```
 Run `.venv/bin/python bot.py --dashboard-json` in this folder. It prints JSON shaped like
-{"<tab name>": [[header...], [row...], ...]} for four tabs: Dashboard, To-dos, Done, Notes & ideas.
+{"<tab name>": [[header...], [row...], ...]} for five tabs: Dashboard, To-dos, Done, Notes & ideas, Error log.
 Using the Google Sheets connector, open my spreadsheet named "Pluto dashboard" (create it if it
 doesn't exist). For each tab in the JSON: create the tab if it's missing, clear it, and write the
 rows exactly as given starting at A1. Write every value as plain text or a number, never as a
@@ -240,6 +245,12 @@ If you use the key only for reading, `--check` and the start-up log also say `GO
 See `CLAUDE.md`. In short: your original message is stored untouched; if labelling fails it is still
 saved as a plain note; recall answers only from saved items; only `ALLOWED_USER_ID` can use the bot;
 keys live only in `pluto.env`.
+
+**Asking before saving a repeat.** If you ask for something that's very like an item you saved earlier the
+same day (most of the same words, e.g. "call the bank" twice), Pluto doesn't save it again straight away. It
+asks "You already asked me for this today … Save it again?" with **Save again** and **Skip** buttons; typing
+"yes" works too. The question holds only for your next message. To-dos are compared with to-dos and notes with
+notes, so noting Rahul's birthday doesn't stop a reminder to wish him.
 
 ## Deploy (later)
 

@@ -53,7 +53,7 @@ def test_request_has_time_conversation_items_and_asks_for_json(gemini):
     g = gemini('{"reply": "Aaj passport renew karna hai (#1).", "save": [], "done": []}')
     history, items = context()
     out = llm.respond("aaj kya hai?", history, items, core.to_local(NOW))
-    assert out == {"reply": "Aaj passport renew karna hai (#1).", "save": [], "done": [], "reschedule": []}
+    assert out == {"reply": "Aaj passport renew karna hai (#1).", "save": [], "done": [], "reschedule": [], "cant": None}
     c = g.calls[0]
     assert "Current local time: Monday, 2026-11-02 12:00" in c.contents
     assert "[Mon 2026-11-02 12:00] User: hello" in c.contents
@@ -78,7 +78,7 @@ def test_prompt_carries_the_product_rules(gemini):
 
 def test_tolerates_code_fences_and_fills_defaults(gemini):
     gemini('```json\n{"reply": "ok"}\n```')
-    assert llm.respond("x", [], [], core.to_local(NOW)) == {"reply": "ok", "save": [], "done": [], "reschedule": []}
+    assert llm.respond("x", [], [], core.to_local(NOW)) == {"reply": "ok", "save": [], "done": [], "reschedule": [], "cant": None}
 
 
 def test_garbage_raises_so_core_saves_a_raw_note(gemini):
@@ -147,7 +147,7 @@ def test_gemini_failure_falls_back_to_groq(monkeypatch):
     monkeypatch.setattr(llm, "_post", http)
 
     out = llm.respond("hi", [], [], core.to_local(NOW))
-    assert out == {"reply": "Groq here", "save": [], "done": [], "reschedule": []}
+    assert out == {"reply": "Groq here", "save": [], "done": [], "reschedule": [], "cant": None}
     assert gem.calls == 1
     [call] = http.calls  # Z AI was not needed
     assert call.headers["Authorization"] == "Bearer test-groq-key"

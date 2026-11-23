@@ -70,6 +70,15 @@ Topics (`items.topic`, `core.update_topics`, `llm.label_topics`, `bot.topics_job
 life-area label per item. The assistant proposes one on save (`save[].topic`); the job labels items with
 none, 40 per AI call, accepting only ids from that batch (skipped ones get "Other"); retries after 10 min.
 `clean_topic`/`known_topic` tidy it and reuse the user's existing spelling. Never touches `original_text`.
+Error log (`issues` table, `core.log_issue`, sheet tab "Error log"): failures (no AI answered, voice not heard,
+sheet read refused, a withheld reply, the sheet sync failing once per outage) and requests Pluto can't do (the
+assistant's `cant` line). `detail` is Pluto's own plain words, never an exception's text (it can hold a link or a
+key). It quotes the user, so `/forget` clears it, `/delete` drops entries for the item's words, and `/export`
+includes it; the newest 500 are kept. Repeats (`core.similar_today`): before saving, an item with mostly the
+same words (≥80% of the shorter title's search terms) saved earlier the same local day, of the same sort (to-do
+vs note/idea), is held and Pluto asks "Save it again?" (`rep:add`/`rep:skip` buttons, `pending_repeat` setting).
+The question lasts one message: a "yes" (or a repeat of the same ask) that proposes it again saves it, keeping
+the first ask's words and time.
 
 Reading a Google Sheet (`sheet_reader.py`) is optional and stays off until
 `GOOGLE_SERVICE_ACCOUNT_FILE` is set. The assistant may ask to read a sheet (`read`), but core
@@ -84,7 +93,7 @@ the other keys: keep it outside the repo.
 
 - `core.py` — the whole flow (`chat`, commands, buttons, time buckets, nudge
   selection, morning digest). Transport-agnostic and synchronous. Put new behaviour here. The model
-  proposes (`reply`, `save`, `done`, `reschedule`, `read`); core checks and applies (only the
+  proposes (`reply`, `save`, `done`, `reschedule`, `read`, `cant`); core checks and applies (only the
   user's own open items can be marked done or moved; a moved item's reminders start afresh).
 - `bot.py` — Telegram adapter only. `simulate.py` — terminal adapter, same flow.
   `watchdog.py` — exits the bot after 5 minutes without any answer from Telegram's
@@ -105,7 +114,7 @@ the other keys: keep it outside the repo.
   `respond(message, history, items, now_local, prefer=None, related=())` works as the assistant.
 - `stt.py` — voice-to-text: Groq Whisper → Gemini → Sarvam, whichever keys exist.
 - `sheets.py` — one-way Google Sheet dashboard, two ways: an Apps Script web app the user
-  deploys in their sheet (`apps_script/Code.gs`, secret word required, only Pluto's four tabs)
+  deploys in their sheet (`apps_script/Code.gs`, secret word required, only Pluto's five tabs)
   or a service account (google-auth, already installed by google-genai). `core.sheet_tables()`
   builds the rows and `core.sheet_styles()` a role per row (`SHEET_ROLES`: header, alert, group, …) plus
   column widths; `apps_script/Code.gs` maps roles to colours (an old script ignores them).

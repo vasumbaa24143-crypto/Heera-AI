@@ -184,11 +184,11 @@ def test_push_creates_missing_tabs_then_rewrites_with_raw_values(configured, mon
 
     assert all(c.url.startswith(f"{sheets.API}/abc123_-XYZ") for c in sess.calls)
     add_req = sess.calls[1].json["requests"]
-    assert [r["addSheet"]["properties"]["title"] for r in add_req] == ["To-dos", "Done", "Notes & ideas"]
+    assert [r["addSheet"]["properties"]["title"] for r in add_req] == ["To-dos", "Done", "Notes & ideas", "Error log"]
     assert all(r["addSheet"]["properties"]["gridProperties"]["frozenRowCount"] == 1 for r in add_req)
     assert sess.calls[2].json["requests"][0]["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["bold"]
     assert sess.calls[3].url.endswith("/values:batchClear")
-    assert sess.calls[3].json["ranges"] == ["'Dashboard'", "'To-dos'", "'Done'", "'Notes & ideas'"]
+    assert sess.calls[3].json["ranges"] == ["'Dashboard'", "'To-dos'", "'Done'", "'Notes & ideas'", "'Error log'"]
     write = sess.calls[4].json
     assert sess.calls[4].url.endswith("/values:batchUpdate")
     assert write["valueInputOption"] == "RAW"                  # never parsed as formulas
