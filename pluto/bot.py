@@ -193,10 +193,14 @@ async def hear(update: Update, get_file, filename, mime, file_id=None) -> None:
     except stt.TranscriptionFailed as e:
         log.warning("transcription failed: %s", e)
         if not stt.providers():
+            core.log_issue(uid, "error", "(voice note)", "I can't listen to voice notes: no "
+                           "transcription key is set up.")
             await message.reply_text(
                 f"I can't listen to voice notes yet: add one of {stt.KEY_NAMES} to pluto.env "
                 "and restart me. Meanwhile, please type it.")
             return
+        core.log_issue(uid, "error", "(voice note)", "I couldn't turn a voice note into text: "
+                       "every transcription service failed.")
         if file_id:
             remember_voice(uid, file_id, filename, mime)
         await send(message, [core.Reply("I couldn't make out that voice note just now. "
@@ -204,6 +208,8 @@ async def hear(update: Update, get_file, filename, mime, file_id=None) -> None:
         return
     except Exception:
         log.exception("could not download the voice note")
+        core.log_issue(uid, "error", "(voice note)", "Telegram was too slow handing me a voice "
+                       "note, so I couldn't listen to it.")
         if file_id:
             remember_voice(uid, file_id, filename, mime)
         await send(message, [core.Reply("Telegram was too slow handing me that voice note. "
@@ -321,7 +327,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.edit_message_reply_markup(reply_markup=None)
     except BadRequest:
         pass  # message too old to edit, or already edited
-    await q.message.reply_text(reply.text)
+    await send(q.message, [reply])
 
 
 async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

@@ -117,6 +117,17 @@ def init() -> None:
                 PRIMARY KEY (user_id, key)
             )"""
         )
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS issues(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,            -- error | cant (a request Pluto can't do)
+                request TEXT NOT NULL,         -- what the user asked ("" if not from a message)
+                detail TEXT NOT NULL,          -- what went wrong, in plain words (never a key)
+                created_at TEXT NOT NULL
+            )"""
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS issues_user ON issues(user_id, id)")
         c.execute("CREATE INDEX IF NOT EXISTS items_user ON items(user_id, status)")
         c.execute("CREATE INDEX IF NOT EXISTS nudges_user ON nudges(user_id, sent_at)")
         # Older prototype builds soft-deleted rows; /delete promises "remove forever".
@@ -315,6 +326,15 @@ def items_in_topic(user_id, topic, limit=30):
         ).fetchall()
 
 
+def items_since(user_id, since_utc):
+    """This user's items (any status) created at or after `since_utc`, newest first."""
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM items WHERE user_id=? AND created_at>=? ORDER BY id DESC",
+            (user_id, to_str(since_utc)),
+        ).fetchall()
+
+
 def get_item(user_id, item_id):
     with conn() as c:
         return c.execute(
@@ -402,6 +422,7 @@ def forget_messages(user_id) -> int:
     with conn() as c:
         c.execute("DELETE FROM summaries WHERE user_id=?", (user_id,))
         c.execute("DELETE FROM facts WHERE user_id=?", (user_id,))
+        c.execute("DELETE FROM issues WHERE user_id=?", (user_id,))  # they quote the chat
         return c.execute("DELETE FROM messages WHERE user_id=?", (user_id,)).rowcount
 
 
@@ -591,6 +612,7 @@ def delete_item(user_id, item_id) -> bool:
         c.execute("DELETE FROM nudges WHERE item_id=? AND user_id=?", (item_id, user_id))
         removed = 0
         for line in row["original_text"].split("\n"):
+            c.execute("DELETE FROM issues WHERE user_id=? AND request=?", (user_id, line))
             removed += c.execute(
                 "DELETE FROM messages WHERE user_id=? AND role='user' AND text=?",
                 (user_id, line),
@@ -634,6 +656,42 @@ def export_all(user_id):
             "SELECT * FROM items WHERE user_id=? ORDER BY id", (user_id,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------- error log ----------
+#
+# Things that went wrong, and requests Pluto can't do, so the user can see them in the
+# sheet's "Error log" tab. `request` quotes the user's words, so /forget clears this too, and
+# /delete removes the entries for the message an item came from.
+
+ISSUES_KEEP = 500   # newest entries kept per user
+
+
+def add_issue(user_id, kind, request, detail, now=None) -> int:
+    with conn() as c:
+        cur = c.execute(
+            "INSERT INTO issues(user_id, kind, request, detail, created_at) VALUES (?,?,?,?,?)",
+            (user_id, kind, request, detail, to_str(now or now_utc())),
+        )
+        c.execute(
+            "DELETE FROM issues WHERE user_id=? AND id NOT IN"
+            " (SELECT id FROM issues WHERE user_id=? ORDER BY id DESC LIMIT ?)",
+            (user_id, user_id, ISSUES_KEEP),
+        )
+        return cur.lastrowid
+
+
+def recent_issues(user_id, limit=200):
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM issues WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit)
+        ).fetchall()
+
+
+def export_issues(user_id):
+    with conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM issues WHERE user_id=? ORDER BY id", (user_id,))]
 
 
 # ---------- nudges ----------

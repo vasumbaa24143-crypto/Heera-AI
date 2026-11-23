@@ -27,10 +27,11 @@ and choices() -> [(name, label)] for the /model menu.
 """
 import json
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import db
@@ -193,6 +194,7 @@ def _normalize(result) -> dict:
     done = result.get("done") or []
     read = result.get("read") or []
     moves = result.get("reschedule") or []
+    cant = result.get("cant")
     if (not isinstance(reply, str) or not isinstance(save, list) or not isinstance(done, list)
             or not isinstance(read, list)):
         raise ValueError("assistant output has the wrong shape")
@@ -204,7 +206,152 @@ def _normalize(result) -> dict:
         "done": [i for i in (parse_id(d) for d in done) if i is not None],
         "read": [u for u in read if isinstance(u, str)],
         "reschedule": [m for m in moves if isinstance(m, dict) and parse_id(m.get("id")) is not None],
+        "cant": cant.strip()[:ISSUE_DETAIL_MAX] if isinstance(cant, str) else "",
     }
+
+
+# ---------- error log ----------
+
+ISSUE_KINDS = {"error": "⚠️ Error", "cant": "🚫 Can't do yet"}
+ISSUE_REQUEST_MAX = 500
+ISSUE_DETAIL_MAX = 300
+
+
+def log_issue(uid, kind, request, detail, now=None) -> None:
+    """Note something that went wrong, or a request Pluto can't do, for the sheet's Error log.
+    `detail` is written by Pluto in plain words; never pass an exception's text (it can hold a
+    link or a key). Logging never breaks the reply."""
+    try:
+        db.add_issue(uid, kind if kind in ISSUE_KINDS else "error",
+                     (request or "").strip()[:ISSUE_REQUEST_MAX],
+                     (detail or "").strip()[:ISSUE_DETAIL_MAX], now=now)
+    except Exception:
+        log.exception("could not write to the error log")
+
+
+# ---------- asking before saving the same thing twice in a day ----------
+
+REPEAT_SHARE = 0.8          # share of the shorter title's words that must match
+REPEAT_ASK_FOR = timedelta(hours=24)   # a "Save it again?" question expires after this
+REPEAT_BUTTONS = [[("➕ Save again", "rep:add"), ("✋ Skip", "rep:skip")]]
+
+
+def _words(text) -> set:
+    return set(db.search_terms(text))
+
+
+def _day_start(now):
+    local = to_local(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    return local.astimezone(timezone.utc)
+
+
+def similar_today(uid, title, now, kind="task", exclude=()):
+    """An item this user saved earlier today (their local day) with mostly the same words as
+    `title`, or None. "call the bank" matches "call bank at 5"; "buy milk" doesn't match
+    "buy shoes". To-dos are compared with to-dos, notes and ideas with notes and ideas, so a
+    note about Rahul's birthday doesn't block a reminder to wish him."""
+    mine = _words(title)
+    if not mine:
+        return None
+    action = kind in ACTION_KINDS
+    for r in db.items_since(uid, _day_start(now)):
+        if r["id"] in exclude or (r["kind"] in ACTION_KINDS) != action:
+            continue
+        theirs = _words(r["title"])
+        shared = len(mine & theirs)
+        if shared and shared >= math.ceil(REPEAT_SHARE * min(len(mine), len(theirs))):
+            return r
+    return None
+
+
+def _take_pending_repeats(uid, now) -> list:
+    """The items held back last time with "Save it again?", cleared as they're read: the
+    question is only for the very next message (or a tap on its buttons)."""
+    raw = db.get_setting(uid, "pending_repeat") or ""
+    db.set_setting(uid, "pending_repeat", "")
+    try:
+        data = json.loads(raw) if raw else {}
+        if now - db.from_str(data["at"]) > REPEAT_ASK_FOR:
+            return []
+        return [p for p in data["items"] if isinstance(p, dict)]
+    except (ValueError, KeyError, TypeError):
+        return []
+
+
+def _add_held(uid, p, now):
+    item_id = db.add_item(uid, p["kind"], p["title"], p["original"], p.get("due"), now=now,
+                          priority=p.get("priority", "normal"), topic=p.get("topic"))
+    return db.get_item(uid, item_id)
+
+
+def _saved_reply(r) -> Reply:
+    follow_up = r["kind"] in ACTION_KINDS or r["due_at"] is not None
+    verb = "Added" if r["kind"] in ACTION_KINDS else "Noted"
+    tag = f"  ·  {topic_icon(r['topic'])} {r['topic']}" if r["topic"] else ""
+    return Reply(f"{verb} {item_line(r)}{tag}", item_buttons(r["id"]) if follow_up else [])
+
+
+def _repeat_question(uid, held) -> Reply:
+    lines = []
+    for p in held:
+        old = db.get_item(uid, p["dup"])
+        lines.append(item_line(old) if old else p["title"])
+    if len(held) == 1:
+        text = f"🔁 You already asked me for this today:\n{lines[0]}\nSave it again?"
+    else:
+        text = "🔁 You already asked me for these today:\n" + "\n".join(lines) + "\nSave them again?"
+    return Reply(text, REPEAT_BUTTONS)
+
+
+def _repeat_note(uid, held) -> str:
+    """How the question is kept in the chat the assistant sees: a plain account rather than the
+    question itself, which a model would otherwise copy for later requests (and then nothing is
+    held and the buttons do nothing)."""
+    titles = ", ".join(f"“{p['title']}”" for p in held)
+    ids = ", ".join(f"#{p['dup']}" for p in held)
+    return (f"(Pluto's app asked whether to save {titles} again, as it was already saved today "
+            f"as {ids}. Nothing new was saved yet.)")
+
+
+# A short reply made only of these words is a plain yes or no to "Save it again?". Anything
+# else ("haan but at 6pm") goes to the assistant as usual.
+_YES_SURE = {"yes", "y", "yeah", "yep", "ok", "okay", "sure", "save", "haan", "han", "ha", "haa",
+             "haanji", "ji", "theek", "thik"}
+_YES_WORDS = _YES_SURE | {"it", "again", "please", "pls", "karo", "kar", "do", "hai", "de", "dena"}
+_NO_SURE = {"no", "n", "nope", "nah", "skip", "cancel", "nahi", "nahin", "na", "mat", "dont",
+            "don't", "rehne", "rahne", "chhodo", "chodo"}
+_NO_WORDS = _NO_SURE | {"thanks", "thank", "you", "do", "karo", "it", "chahiye", "need", "ji",
+                        "save", "again"}
+
+
+def _yes_or_no(text):
+    """'add' or 'skip' for a plain yes or no, else None."""
+    words = re.sub(r"[^\w\s']", " ", text.lower()).split()
+    if not words or len(words) > 5:
+        return None
+    if all(w in _NO_WORDS for w in words) and any(w in _NO_SURE for w in words):
+        return "skip"
+    if all(w in _YES_WORDS for w in words) and any(w in _YES_SURE for w in words):
+        return "add"
+    return None
+
+
+def _apply_repeat(uid, held, choice, now) -> Reply:
+    if not held:
+        return Reply("That question has expired. Tell me again if you still need it.")
+    if choice == "add":
+        replies = [_saved_reply(_add_held(uid, p, now)) for p in held]
+        return Reply("\n".join(r.text for r in replies),
+                     replies[0].buttons if len(replies) == 1 else [])
+    return Reply("Okay, I didn't save it again.")
+
+
+def answer_repeat(uid, choice, now=None) -> Reply:
+    """The buttons under "Save it again?"."""
+    now = now or db.now_utc()
+    reply = _apply_repeat(uid, _take_pending_repeats(uid, now), choice, now)
+    db.add_message(uid, "pluto", reply.text, now=now)
+    return reply
 
 
 def save_raw(uid, text, now) -> Reply:
@@ -298,6 +445,12 @@ def chat(uid, text, llm, now=None, replying_to=None) -> list:
     oldest_recent = history[0]["id"] if history else None
     related = db.search_messages(uid, text, SEARCH_HITS, before_id=oldest_recent) if history else []
     db.add_message(uid, "user", text, now=now)  # the user's words, kept as said
+    pending = _take_pending_repeats(uid, now)
+    choice = _yes_or_no(text) if pending else None
+    if choice:   # a plain "haan" / "no" to "Save it again?": no AI needed
+        reply = _apply_repeat(uid, pending, choice, now)
+        db.add_message(uid, "pluto", reply.text, now=now)
+        return [reply]
 
     message = text
     quoted = (replying_to or "").strip()
@@ -308,13 +461,19 @@ def chat(uid, text, llm, now=None, replying_to=None) -> list:
     try:
         result, sheet_ids = _think(llm, uid, text, history, rows, now, related, message)
     except sheet_reader.SheetReadError as e:
+        log_issue(uid, "error", text, str(e), now)
         return _say(uid, str(e), now)
     except Exception:
         # Never lose a thought: if the assistant fails, keep the message as a note.
         log.exception("assistant failed; saving raw note")
         reply = save_raw(uid, text, now)
+        log_issue(uid, "error", text, "No AI answered properly (all were down or sent something "
+                  "unreadable), so I kept your message as a plain note.", now)
         db.add_message(uid, "pluto", reply.text, now=now)
         return [reply]
+
+    if result["cant"]:
+        log_issue(uid, "cant", text, result["cant"], now)
 
     open_ids = {r["id"] for r in rows if r["status"] == "open"}
 
@@ -338,7 +497,7 @@ def chat(uid, text, llm, now=None, replying_to=None) -> list:
 
     # Save what the assistant decided to keep (information automatically;
     # tasks, promises and reminders only when the user asked for them).
-    saved = []
+    saved, held = [], []
     prev = _previous_user_message(history)
     for it in result["save"]:
         kind = it.get("kind") if it.get("kind") in KIND_ICON else "note"
@@ -350,9 +509,24 @@ def chat(uid, text, llm, now=None, replying_to=None) -> list:
             original = f"{prev}\n{text}"  # e.g. "remind me to call Rahul" + "kal 5 baje"
         priority = it.get("priority") if it.get("priority") in db.PRIORITIES else "normal"
         topic = known_topic(uid, clean_topic(it.get("topic")))
+        # Something very like it was saved earlier today: ask before saving it twice, unless
+        # this message is the "yes" to that very question.
+        dup = similar_today(uid, title, now, kind, exclude={r["id"] for r in saved})
+        if dup is not None:
+            asked = next((p for p in pending if p.get("dup") == dup["id"]), None)
+            if asked is None:
+                held.append({"kind": kind, "title": title, "original": original,
+                             "due": due_utc,
+                             "priority": priority, "topic": topic, "dup": dup["id"]})
+                continue
+            if asked["original"] not in original:
+                original = f"{asked['original']}\n{text}"  # keep the words of the first ask
+            due_utc = due_utc or asked.get("due")
         item_id = db.add_item(uid, kind, title, original, due_utc, now=now, priority=priority,
                               topic=topic)
         saved.append(db.get_item(uid, item_id))
+    if held:
+        db.set_setting(uid, "pending_repeat", json.dumps({"at": db.to_str(now), "items": held}))
 
     # Never invent a memory: withhold a reply that cites items the user doesn't have
     # (numbers like #77 that come from a sheet they linked are theirs).
@@ -362,22 +536,26 @@ def chat(uid, text, llm, now=None, replying_to=None) -> list:
     if invented:
         log.warning("assistant cited unknown items %s; reply withheld", sorted(invented))
         reply = "I couldn't find that in what you've saved with me."
+        log_issue(uid, "error", text, "The AI's answer mentioned items you don't have, so I "
+                  "held it back instead of guessing.", now)
+    if held and not saved:
+        reply = ""  # it would say "done!" for something that is now waiting on the question
 
     replies = []
     head = "\n".join(x for x in [reply, *done_lines] if x)
     if head:
         replies.append(Reply(_short(head)))
     for r in saved:
-        follow_up = r["kind"] in ACTION_KINDS or r["due_at"] is not None
-        verb = "Added" if r["kind"] in ACTION_KINDS else "Noted"
-        tag = f"  ·  {topic_icon(r['topic'])} {r['topic']}" if r["topic"] else ""
-        replies.append(
-            Reply(f"{verb} {item_line(r)}{tag}", item_buttons(r["id"]) if follow_up else [])
-        )
+        replies.append(_saved_reply(r))
+    if held:
+        replies.append(_repeat_question(uid, held))
     if not replies:
         replies.append(Reply("🙂"))
 
-    db.add_message(uid, "pluto", "\n".join(r.text for r in replies), now=now)
+    shown = [r.text for r in replies]
+    if held:
+        shown[-1] = _repeat_note(uid, held)
+    db.add_message(uid, "pluto", "\n".join(shown), now=now)
     return replies
 
 
@@ -464,7 +642,8 @@ def choose_model(uid, llm, name) -> Reply:
 def export_json(uid) -> str:
     return json.dumps(
         {"items": db.export_all(uid), "messages": db.export_messages(uid),
-         "summaries": db.export_summaries(uid), "facts": db.export_facts(uid)},
+         "summaries": db.export_summaries(uid), "facts": db.export_facts(uid),
+         "error_log": db.export_issues(uid)},
         ensure_ascii=False,
         indent=2,
     )
@@ -475,6 +654,8 @@ def button(uid, data, now=None, llm=None):
     action, _, raw = (data or "").partition(":")
     if action == "model":
         return choose_model(uid, llm, raw) if llm is not None else None
+    if action == "rep" and raw in ("add", "skip"):
+        return answer_repeat(uid, raw, now)
     item_id = parse_id(raw)
     if item_id is None:
         return None
@@ -861,7 +1042,8 @@ def cmd_topic(uid, arg=None) -> Reply:
 
 # ---------- Google Sheet dashboard (data only; sheets.py does the Google calls) ----------
 
-SHEET_TABS = ("Dashboard", "To-dos", "Done", "Notes & ideas")
+SHEET_TABS = ("Dashboard", "To-dos", "Done", "Notes & ideas", "Error log")
+SHEET_ISSUES_MAX = 200
 _BUCKET_ORDER = ["overdue", "today", "tomorrow", "this week", "this month", "later", "no date"]
 _PRIORITY_RANK = {"high": 0, "normal": 1, "low": 2}
 KIND_LABEL = {"task": "✅ Task", "promise": "🤝 Promise", "idea": "💡 Idea", "note": "📝 Note"}
@@ -1069,7 +1251,18 @@ def _sheet(uid, now):
                               _topic_cell(r), _saved_when(r["created_at"], now), r["original_text"]])
             note_roles.append("row")
 
-    tables = {"Dashboard": dash, "To-dos": todo_rows, "Done": done_rows, "Notes & ideas": note_rows}
+    # Error log: what went wrong and what Pluto couldn't do, newest first.
+    issue_rows, issue_roles = [["When", "Type", "What you asked", "What happened"]], ["header"]
+    for r in db.recent_issues(uid, SHEET_ISSUES_MAX):
+        issue_rows.append([_local_str(r["created_at"]), ISSUE_KINDS.get(r["kind"], r["kind"]),
+                           r["request"] or "—", r["detail"]])
+        issue_roles.append("alert" if r["kind"] == "error" else "urgent")
+    if len(issue_rows) == 1:
+        issue_rows.append(["Nothing has gone wrong so far.", "", "", ""])
+        issue_roles.append("note")
+
+    tables = {"Dashboard": dash, "To-dos": todo_rows, "Done": done_rows, "Notes & ideas": note_rows,
+              "Error log": issue_rows}
     styles = {
         "Dashboard": {"roles": roles, "widths": [340, 150, 150, 170, 60], "wrap": [1],
                       "gridlines": False, "tab_color": "#4f46e5"},
@@ -1081,6 +1274,8 @@ def _sheet(uid, now):
                  "freeze": 1, "filter": True, "tab_color": "#16a34a"},
         "Notes & ideas": {"roles": note_roles, "widths": [50, 320, 100, 150, 110, 420],
                           "wrap": [2], "freeze": 1, "tab_color": "#d97706"},
+        "Error log": {"roles": issue_roles, "widths": [140, 130, 380, 420], "wrap": [3, 4],
+                      "freeze": 1, "filter": len(issue_rows) > 2, "tab_color": "#6b7280"},
     }
     return tables, styles
 
@@ -1118,7 +1313,10 @@ def sync_sheet(uid, push, force=False, now=None) -> str:
     try:
         link = push(tables, styles)
     except Exception as e:
-        db.set_setting(uid, "sheet_error", str(e)[:300])
+        if not db.get_setting(uid, "sheet_error"):   # once per outage, not every few minutes
+            log_issue(uid, "error", "", "I couldn't update this Google Sheet (/sheet in Telegram "
+                      "shows why).", now)
+        db.set_setting(uid, "sheet_error", str(e)[:300] or type(e).__name__)
         raise
     if isinstance(link, str) and link:
         db.set_setting(uid, "sheet_url", link)

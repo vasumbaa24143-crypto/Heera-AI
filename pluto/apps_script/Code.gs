@@ -10,7 +10,7 @@
  *  4. Copy the Web app URL (ends in /exec) into .env as GOOGLE_APPS_SCRIPT_URL.
  *
  * "Anyone" only means the link works without a Google login; every request must carry
- * the SECRET, or it's refused. The script only ever touches Pluto's four tabs.
+ * the SECRET, or it's refused. The script only ever touches Pluto's five tabs.
  *
  * Updating to a newer copy of this script: paste it over the old one (keep your SECRET),
  * save, then Deploy -> Manage deployments -> edit (pencil) -> Version: New version -> Deploy.
@@ -18,7 +18,7 @@
  */
 const SECRET = 'CHANGE-ME-to-a-long-random-word';
 
-const TABS = ['Dashboard', 'To-dos', 'Done', 'Notes & ideas'];
+const TABS = ['Dashboard', 'To-dos', 'Done', 'Notes & ideas', 'Error log'];
 const MAX_ROWS = 20000;
 const MAX_COLS = 30;
 
